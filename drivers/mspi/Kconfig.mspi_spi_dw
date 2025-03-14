@@ -1,0 +1,20 @@
+#  Copyright (c) 2025 Tenstorrent AI ULC
+#  SPDX-License-Identifier: Apache-2.0
+
+config MSPI_SPI_DW
+	bool "SPI DW MSPI driver"
+	default y
+	depends on DT_HAS_SNPS_DESIGNWARE_SPI_ENABLED && !SPI_DW
+
+if MSPI_SPI_DW
+
+config MSPI_SPI_DW_SLAVE_COUNT
+	int "Max number of SPI slaves"
+	default 1
+	range 1 32
+	help
+	  The maximum number of SPI slaves that can be connected to the
+	  SPI DW MSPI driver. This is used to determine how many
+	  tracking structures should be allocated for slave devices
+
+endif # MSPI_SPI_DW
