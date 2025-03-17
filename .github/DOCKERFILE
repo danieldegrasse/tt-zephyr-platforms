@@ -1,0 +1,18 @@
+# Image to run tt-zephyr-platforms CI tests (nightly and per-PR)
+# rebuilt nightly
+
+ARG BASE_REV
+FROM ${ghcr.io/zephyrproject-rtos/zephyr-build:BASE_REV}
+
+# Build openocd revision with RTT support
+RUN cd /tmp/openocd-build && \
+    git clone https://github.com/openocd-org/openocd.git && \
+    cd openocd && \
+    git checkout 44e782d55bf1ce0d924c082281082496cdc2495e && \
+    git submodule init && \
+    git submodule update --recursive && \
+    ./bootstrap && \
+    ./configure --enable-rtos=FreeRTOS --enable-rtos=Zephyr --enable-rtos=RIOT && \
+    make -j$(nproc) && \
+    make install
+    rm -r /tmp/openocd-build
