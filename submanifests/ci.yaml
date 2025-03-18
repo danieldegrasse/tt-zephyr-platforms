@@ -9,7 +9,7 @@ manifest:
   # zephyr-keep-sorted-start re(^\s+\- name:)
   projects:
     - name: openocd
-      revision: 44e782d55bf1ce0d924c082281082496cdc2495e
+      revision: 720c2b6023433ae4d11d929a74c71e96f5d8159f
       path: ci/openocd
       remote: danieldegrasse
       groups:
