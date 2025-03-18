@@ -3,7 +3,7 @@ manifest:
     - name: danieldegrasse
       url-base: https://github.com/danieldegrasse
     - name: tenstorrent
-      url-base: https://github.com/tenstorrent/tt-metal
+      url-base: https://github.com/tenstorrent
   defaults:
     remote: tenstorrent
   # zephyr-keep-sorted-start re(^\s+\- name:)
