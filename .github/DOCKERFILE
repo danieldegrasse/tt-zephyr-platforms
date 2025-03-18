@@ -5,14 +5,44 @@ ARG BASE_REV
 FROM ${ghcr.io/zephyrproject-rtos/zephyr-build:BASE_REV}
 
 # Build openocd revision with RTT support
-RUN cd /tmp/openocd-build && \
-    git clone https://github.com/openocd-org/openocd.git && \
+RUN mkdir /tmp/openocd-build && \
+    cd /tmp/openocd-build && \
+    git clone https://github.com/danieldegrasse/openocd.git && \
     cd openocd && \
     git checkout 44e782d55bf1ce0d924c082281082496cdc2495e && \
     git submodule init && \
     git submodule update --recursive && \
     ./bootstrap && \
-    ./configure --enable-rtos=FreeRTOS --enable-rtos=Zephyr --enable-rtos=RIOT && \
+    ./configure && \
     make -j$(nproc) && \
-    make install
-    rm -r /tmp/openocd-build
+    make install && \
+    cd ~ && \
+    rm -rf /tmp/openocd-build
+
+# Update cmake to 3.30.0 (not the latest, so we use apt-mark hold to prevent it from being updated)
+RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null && \
+    echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ jammy main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null && \
+    apt-get update && \
+    apt-get install -y cmake=3.30.8-0kitware1ubuntu22.04.1 cmake-data=3.30.8-0kitware1ubuntu22.04.1 && \
+    apt-mark hold cmake cmake-data
+
+# Patch APT urls to use https, since the container can't connect via HTTP
+RUN sed -i -e 's/http/https/g' /etc/apt/sources.list && \
+    apt-get update
+
+# Install clang-17 to build metal (we need to manually patch the apt sources to use https)
+RUN mkdir /tmp/llvm-build && \
+    cd /tmp/llvm-build && \
+    wget https://apt.llvm.org/llvm.sh && \
+    sed -i "s/http:\/\/apt.llvm.org/https:\/\/apt.llvm.org/" -i llvm.sh && \
+    chmod +x llvm.sh && \
+    ./llvm.sh 17 all && \
+    cd ~ && \
+    rm -rf /tmp/llvm-build
+
+# Clone the tt-zephyr-platforms repo
+RUN west init -m https://github.com/danieldegrasse/tt-zephyr-platforms /tt-zephyr-platforms && \
+    cd /tt-zephyr-platforms && \
+    west update
+
+# Build metal from source

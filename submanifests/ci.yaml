@@ -1,0 +1,28 @@
+manifest:
+  remotes:
+    - name: danieldegrasse
+      url-base: https://github.com/danieldegrasse
+    - name: tenstorrent
+      url-base: https://github.com/tenstorrent/tt-metal
+  defaults:
+    remote: tenstorrent
+  # zephyr-keep-sorted-start re(^\s+\- name:)
+  projects:
+    - name: openocd
+      revision: 44e782d55bf1ce0d924c082281082496cdc2495e
+      path: ci/openocd
+      remote: danieldegrasse
+      groups:
+        - ci
+    - name: tt-metal
+      revision: v0.56.0
+      groups:
+        - ci
+    - name: luwen
+      revision: v0.6.2
+      groups:
+        - ci
+    - name: tt-flash
+      revision: 5f50ea6751a709964299fc4da77f5ebcf6016197
+      groups:
+        - ci
