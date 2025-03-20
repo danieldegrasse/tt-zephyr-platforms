@@ -84,12 +84,12 @@ RUN source /zephyr-env/bin/activate && \
     pip install /tt-zephyr/ci/luwen/target/wheels/pyluwen-* --force-reinstall
 
 # Copy the build environments and metal to a new stage
-FROM base
-
-COPY --from=builder /metal-env /metal-env
-COPY --from=builder /zephyr-env /zephyr-env
-COPY --from=builder /opt/openocd /opt/openocd
-COPY --from=builder /tt-zephyr/ci/tt-metal /tt-zephyr/ci/tt-metal
-
-RUN cd /tt-zephyr/ci/tt-metal && \
-    ./install_dependencies.sh --docker --mode runtime
+# FROM base
+#
+# COPY --from=builder /metal-env /metal-env
+# COPY --from=builder /zephyr-env /zephyr-env
+# COPY --from=builder /opt/openocd /opt/openocd
+# COPY --from=builder /tt-zephyr/ci/tt-metal /tt-zephyr/ci/tt-metal
+#
+# RUN cd /tt-zephyr/ci/tt-metal && \
+#     ./install_dependencies.sh --docker --mode runtime
