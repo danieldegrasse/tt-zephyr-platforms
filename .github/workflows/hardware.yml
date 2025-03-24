@@ -425,12 +425,12 @@ jobs:
           fi
 
   build-container:
-    runs-on: [self-hosted, Linux]
+    runs-on: [ubuntu-latest]
     needs: get-container-name
     if: ${{ needs.get-container-name.outputs.build-container == 'true' }}
     env:
       REGISTRY: ghcr.io
-      IMAGE_NAME: tt-zephyr-platforms/ubuntu-22-04-ci-image
+      IMAGE_NAME: ${{ github.repository }}/tt-zephyr-platforms/ubuntu-22-04-ci-image
     permissions:
       packages: write
       contents: read

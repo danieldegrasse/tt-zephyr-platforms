@@ -28,7 +28,7 @@ manifest:
       groups:
         - ci
     - name: tt-metal
-      revision: v0.56.0
+      revision: v0.55.0
       path: ci/tt-metal
       submodules: true
       groups:
