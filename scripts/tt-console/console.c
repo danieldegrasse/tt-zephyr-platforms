@@ -918,15 +918,15 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+	if (signal(SIGINT, handler) == SIG_ERR) {
+		E("signal: %s", strerror(errno));
+		return EXIT_FAILURE;
+	}
+
 	if (use_jtag) {
 		if (jlink_init(verbose, jtag_serial_number) != 0) {
 			return EXIT_FAILURE;
 		}
-	}
-
-	if (signal(SIGINT, handler) == SIG_ERR) {
-		E("signal: %s", strerror(errno));
-		return EXIT_FAILURE;
 	}
 
 	if (loop(&_cons) < 0) {
