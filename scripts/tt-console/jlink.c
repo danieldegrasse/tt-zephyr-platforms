@@ -1,13 +1,24 @@
 /*
  * Copyright (c) 2025 Tenstorrent AI ULC
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
+/*
+ * TODO:
+ * JTAG scan chains operate on the concept of a bunch of linked TAPS.
+ * you need to modify the read/write IR functions to accept a jtag state variable,
+ * and a target TAP. When clocking data in or out of the JTAG DR scan chain, you need
+ * account for the bypass registers (one bit each).
+ * when clocking data into the IR scan chain, keep in mind each IR is a fixed
+ * length (4 bytes)
  */
 
 #include <libjaylink/libjaylink.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <unistd.h>
 
 #define D(level, fmt, ...)                                                                         \
 	if (verbose >= level) {                                                                    \
@@ -29,7 +40,7 @@ static struct jaylink_connection conn;
 
 #define DIV_ROUND_UP(val, div) ((((val) + ((div) - 1))) / (div))
 
-static int jlink_write_ir(uint8_t *data, int bit_len)
+static int jlink_write_ir(uint8_t *data, int bit_len, bool return_to_idle)
 {
 	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
 	uint8_t	tdi = 0;
@@ -53,10 +64,12 @@ static int jlink_write_ir(uint8_t *data, int bit_len)
 	if (ret != JAYLINK_OK) {
 		return ret;
 	}
-	/* Now in Exit1 IR, move back to idle state */
+
 	memset(tms, 0, sizeof(tms));
+	/* Now in Exit1 IR, move back to idle or update-ir state */
 	tms[0] = 0x1;
-	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, 2, JAYLINK_JTAG_VERSION_3);
+	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, return_to_idle ? 2 : 1,
+			      JAYLINK_JTAG_VERSION_3);
 	if (ret != JAYLINK_OK) {
 		return ret;
 	}
@@ -64,7 +77,7 @@ static int jlink_write_ir(uint8_t *data, int bit_len)
 	return 0;
 }
 
-static int jlink_write_dr(uint8_t *data, int bit_len)
+static int jlink_write_dr(uint8_t *data, int tap_idx, int bit_len, bool return_to_idle)
 {
 	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
 	uint8_t	tdi = 0;
@@ -80,6 +93,12 @@ static int jlink_write_dr(uint8_t *data, int bit_len)
 	}
 
 	memset(tms, 0, sizeof(tms));
+	/* clock extra cycles to shift data to our target tap */
+	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, tap_idx,
+			      JAYLINK_JTAG_VERSION_3);
+	if (ret != JAYLINK_OK) {
+		return ret;
+	}
 	/* Set last bit of tms to 1 to exit from SHIFT DR state */
 	tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
 	/* Send DR data */
@@ -88,10 +107,12 @@ static int jlink_write_dr(uint8_t *data, int bit_len)
 	if (ret != JAYLINK_OK) {
 		return ret;
 	}
-	/* Now in Exit1 DR, move back to idle state */
+
 	memset(tms, 0, sizeof(tms));
+	/* Now in Exit1 DR, move back to idle or update-dr state */
 	tms[0] = 0x1;
-	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, 2, JAYLINK_JTAG_VERSION_3);
+	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, return_to_idle ? 2 : 1,
+			      JAYLINK_JTAG_VERSION_3);
 	if (ret != JAYLINK_OK) {
 		return ret;
 	}
@@ -99,7 +120,7 @@ static int jlink_write_dr(uint8_t *data, int bit_len)
 	return 0;
 }
 
-static int jlink_read_dr(uint8_t *out, int bit_len)
+static int jlink_read_dr(uint8_t *out, int tap_idx, int bit_len, bool return_to_idle)
 {
 	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
 	uint8_t tdi[DIV_ROUND_UP(bit_len, 8)];
@@ -117,6 +138,13 @@ static int jlink_read_dr(uint8_t *out, int bit_len)
 
 	memset(tms, 0, sizeof(tms));
 	memset(tdi, 0, sizeof(tdi));
+	/* clock extra cycles to shift data from our target tap */
+	ret = jaylink_jtag_io(devh, tms, tdi, &dummy_tdo, tap_idx,
+			      JAYLINK_JTAG_VERSION_3);
+	if (ret != JAYLINK_OK) {
+		return ret;
+	}
+
 	/* Set last bit of tms to 1 to exit from SHIFT DR state */
 	tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
 	/* Read DR data */
@@ -125,10 +153,12 @@ static int jlink_read_dr(uint8_t *out, int bit_len)
 	if (ret != JAYLINK_OK) {
 		return ret;
 	}
-	/* Now in Exit1 DR, move back to idle state */
+
 	memset(tms, 0, sizeof(tms));
+	/* Now in Exit1 DR, move back to idle or update-dr state */
 	tms[0] = 0x1;
-	ret = jaylink_jtag_io(devh, tms, tdi, &dummy_tdo, 2, JAYLINK_JTAG_VERSION_3);
+	ret = jaylink_jtag_io(devh, tms, tdi, &dummy_tdo, return_to_idle ? 2 : 1,
+			      JAYLINK_JTAG_VERSION_3);
 	if (ret != JAYLINK_OK) {
 		return ret;
 	}
@@ -157,27 +187,86 @@ static void jlink_test(void)
 {
 	int ret;
 
-	uint8_t idcode_ir = 0xC;
-	uint32_t idcode = 0;
+	/* ARC expects 16 bits of 0xff after IR reg, because IR scan chain is 20 bits */
+	uint8_t ir[] = {0xcf, 0xff, 0xf};
+	/* We are scanning for IDCODE at first entry in chain */
+	uint8_t dr[8] = {0};
 
 	ret = jlink_go_idle();
 	if (ret < 0) {
 		printf("Error, failed to enter run/test idle\n");
 	}
 	/* Write IR to read IDCODE */
-	ret = jlink_write_ir(&idcode_ir, 4);
+	ret = jlink_write_ir(ir, 20, true);
 	if (ret < 0) {
 		printf("Error, failed to write IDCODE reg\n");
 	}
 	/* Read IDCODE */
-	ret = jlink_read_dr((uint8_t *)&idcode, 32);
+	ret = jlink_read_dr(dr, 1, 32, true);
 	if (ret < 0) {
 		printf("Error, failed to read idcode reg\n");
 	}
-	printf("Idcode reg was 0x%04X\n", idcode);
+	printf("Idcode reg was 0x%04X\n", *(uint32_t *)dr);
+	ir[0] = 0x9f;
+	ret = jlink_write_ir(ir, 20, false);
+	if (ret < 0) {
+		printf("Error, failed to write transaction address reg\n");
+	}
+	dr[0] = 0x3;
+	/* Write DR to issue NOP */
+	/* Note we send 3 extra bits after the 4 bit value for the bypass regs */
+	ret = jlink_write_dr(dr, 1, 4 + 3, true);
+	if (ret < 0) {
+		printf("Error, failed to write transaction address dr\n");
+	}
+
+	/* Try to read from a memory address on ARC */
+	/* Write IR to select transaction command */
+	ir[0] = 0x9f;
+	ret = jlink_write_ir(ir, 20, false);
+	if (ret < 0) {
+		printf("Error, failed to write transaction address reg\n");
+	}
+	dr[0] = 0x4;
+	/* Note we send 3 extra bits after the 4 bit value for the bypass regs */
+	/* Write DR to issue memory write */
+	ret = jlink_write_dr(dr, 1, 4 + 3, false);
+	if (ret < 0) {
+		printf("Error, failed to write transaction address dr\n");
+	}
+	ir[0] = 0xaf;
+	/* Write IR to select address */
+	ret = jlink_write_ir(ir, 20, false);
+	if (ret < 0) {
+		printf("Error, failed to write memory address reg\n");
+	}
+	/* Return to idle here so the transaction executes */
+	/* Write DR with address we want to access */
+	/* Postcode reg 0x80030060 */
+	dr[0] = 0x60;
+	dr[1] = 0x0;
+	dr[2] = 0x3;
+	dr[3] = 0x80;
+	/* Note we send 3 extra bits after the 32 bit value for the bypass regs */
+	ret = jlink_write_dr(dr, 1, 32 + 3, true);
+	if (ret < 0) {
+		printf("Error, failed to write memory address dr\n");
+	}
+	ir[0] = 0xbf;
+	/* Write IR to select data reg */
+	ret = jlink_write_ir(ir, 20, true);
+	if (ret < 0) {
+		printf("Error, failed to write data address reg\n");
+	}
+	/* Read Data */
+	ret = jlink_read_dr(dr, 1, 32, true);
+	if (ret < 0) {
+		printf("Error, failed to read data address reg\n");
+	}
+	printf("DR read was 0x%04X\n", *(uint32_t *)dr);
 }
 
-int jlink_init(int verbose, const char *serial_number)
+int jlink_init(int log_level, const char *serial_number)
 {
 	size_t num_devs;
 	struct jaylink_device **devs;
@@ -186,6 +275,8 @@ int jlink_init(int verbose, const char *serial_number)
 	bool found_handle;
 	size_t conn_count;
 	int ret;
+
+	verbose = log_level;
 
 	ret = jaylink_init(&ctx);
 	if (ret != JAYLINK_OK) {
@@ -257,6 +348,10 @@ int jlink_init(int verbose, const char *serial_number)
 			E("Failed to get extended capabilities: %s", jaylink_strerror(ret));
 			goto error;
 		}
+	}
+
+	if (verbose > 3) {
+		jaylink_log_set_level(ctx, JAYLINK_LOG_LEVEL_DEBUG);
 	}
 
 	if (jaylink_has_cap(caps, JAYLINK_DEV_CAP_REGISTER)) {
