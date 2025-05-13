@@ -365,7 +365,7 @@ static int jtag_go_idle(void)
 	return 0;
 }
 
-static void arc_jtag_init(void)
+static void arc_jtag_queue_init(void)
 {
 	/*
 	 * In the future, we could replace this with a function that
@@ -575,7 +575,7 @@ void jlink_test(void)
 	}
 }
 
-int jlink_init(int log_level, const char *serial_number)
+int arc_jtag_init(int log_level, const char *serial_number)
 {
 	size_t num_devs;
 	struct jaylink_device **devs;
@@ -701,7 +701,7 @@ int jlink_init(int log_level, const char *serial_number)
 	}
 
 	/* Init JTAG queue and check the IDCODE register */
-	arc_jtag_init();
+	arc_jtag_queue_init();
 	ret = jtag_go_idle();
 	if (ret < 0) {
 		E("Failed to enter run/test idle");
@@ -732,7 +732,7 @@ error:
 	return ret;
 }
 
-void jlink_exit(void)
+void arc_jtag_exit(void)
 {
 	size_t conn_count;
 	struct jaylink_connection conns[JAYLINK_MAX_CONNECTIONS];

@@ -30,7 +30,7 @@
 
 #include <tenstorrent/uart_tt_virt.h>
 
-#include "jlink.h"
+#include "arc_jtag.h"
 
 #ifndef UART_TT_VIRT_MAGIC
 #define UART_TT_VIRT_MAGIC 0x775e21a1
@@ -906,7 +906,7 @@ static int parse_args(struct console *cons, int argc, char **argv)
 static void handler(int sig)
 {
 	I("\nCaught signal %d (%s)", sig, strsignal(sig));
-	jlink_exit();
+	arc_jtag_exit();
 	_cons.stop = true;
 }
 
@@ -924,7 +924,7 @@ int main(int argc, char **argv)
 	}
 
 	if (use_jtag) {
-		if (jlink_init(verbose, jtag_serial_number) != 0) {
+		if (arc_jtag_init(verbose, jtag_serial_number) != 0) {
 			return EXIT_FAILURE;
 		}
 	}
