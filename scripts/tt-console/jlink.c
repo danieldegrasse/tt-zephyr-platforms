@@ -42,14 +42,31 @@ static struct jaylink_connection conn;
 
 #define DIV_ROUND_UP(val, div) ((((val) + ((div) - 1))) / (div))
 
+#define JTAG_QUEUE_SIZE 256 /* Number of JTAG states we can queue transations between */
+
+/* ARC JTAG definitions */
+#define ARC_IDCODE 0x201444B1
+
+#define ARC_JTAG_STATUS_REG 0x8
+#define ARC_TRANSACTION_CMD_REG 0x9
+#define ARC_ADDRESS_REG 0xa
+#define ARC_DATA_REG 0xb
+#define ARC_IDCODE_REG 0xc
+#define ARC_BYPASS_REG 0xf
+
+#define ARC_TRANSACTION_WRITE_MEM 0x0
+#define ARC_TRANSACTION_WRITE_REG 0x1
+#define ARC_TRANSACTION_WRITE_AUX_REG 0x2
+#define ARC_TRANSACTION_NOP 0x3
+#define ARC_TRANSACTION_READ_MEM 0x4
+#define ARC_TRANSACTION_READ_REG 0x5
+#define ARC_TRANSACTION_READ_AUX_REG 0x6
+
 struct tdo_buffer {
 	uint8_t *buf;
 	int bit_len;
 	struct tdo_buffer *next;
 };
-
-/* Number of JTAG states we can queue transations between */
-#define JTAG_QUEUE_SIZE 256
 
 /* Tracks queued JTAG transactions */
 static struct {
@@ -330,7 +347,7 @@ static int jtag_execute_queue(void)
 	return 0;
 }
 
-static int jlink_go_idle(void)
+static int jtag_go_idle(void)
 {
 	uint8_t tms = 0x1f;
 	int ret;
@@ -348,7 +365,7 @@ static int jlink_go_idle(void)
 	return 0;
 }
 
-static void jtag_init_arc(void)
+static void arc_jtag_init(void)
 {
 	/*
 	 * In the future, we could replace this with a function that
@@ -365,75 +382,197 @@ static void jtag_init_arc(void)
 	memset(jtag_queue.tdo, 0, sizeof(jtag_queue.tdo));
 }
 
-static void jlink_test(void)
+/*
+ * Reads IDCODE register from TAP 0 for attached device
+ */
+static int arc_jtag_read_idcode(uint32_t *idcode)
 {
 	int ret;
 	uint8_t data;
-	uint32_t dr;
-
-	jtag_init_arc();
-
-	ret = jlink_go_idle();
-	if (ret < 0) {
-		printf("Error, failed to enter run/test idle\n");
-	}
 
 	data = 0xc;
 	/* Write IR to read IDCode */
 	ret = jtag_enqueue_write_ir(&data, 0, 4, true);
 	if (ret < 0) {
-		printf("Error, failed to queue IR write for IDCODE\n");
+		E("Error, failed to queue IR write for IDCODE\n");
+		return ret;
 	}
 	/* Read IDCode */
-	ret = jtag_enqueue_read_dr((uint8_t *)&dr, 0, 32, true);
+	ret = jtag_enqueue_read_dr((uint8_t *)idcode, 0, 32, true);
 	if (ret < 0) {
-		printf("Error, failed to queue DR read for IDCODE\n");
+		E("Error, failed to queue DR read for IDCODE\n");
+		return ret;
 	}
 	ret = jtag_execute_queue();
 	if (ret < 0) {
-		printf("Error, failed to execute JTAG queue\n");
+		E("Error, failed to execute JTAG queue\n");
+		return ret;
 	}
-	printf("IDCODE was 0x%08X\n", dr);
+	return ret;
+}
+
+/*
+ * Reads `wcount` words of device memory, starting at address `start_addr` into
+ * `buf`. This function is specific to the JTAG implementation on ARC HS4x.
+ */
+static int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
+{
+	int ret;
+	uint8_t data;
+
 	/* Write to IR to select transaction CMD on TAP 1 */
-	data = 0x9;
+	data = ARC_TRANSACTION_CMD_REG;
 	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to queue IR write for transaction CMD\n");
+		E("Error, failed to queue IR write for transaction CMD\n");
+		return ret;
 	}
-	/* Select memory read transactions */
-	data = 0x4;
+	/* Select memory read transaction */
+	data = ARC_TRANSACTION_READ_MEM;
 	ret = jtag_enqueue_write_dr(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to queue DR write for transaction CMD\n");
+		E("Error, failed to queue DR write for transaction CMD\n");
+		return ret;
 	}
 	/* Write to IR to select address on TAP 1 */
-	data = 0xa;
+	data = ARC_ADDRESS_REG;
 	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to queue IR write for address CMD\n");
+		E("Error, failed to queue IR write for address CMD\n");
+		return ret;
 	}
 	/* Write DR with address we want to access. Return to idle so transaction runs */
-	dr = 0x80030060; /* postcode reg */
-	ret = jtag_enqueue_write_dr((uint8_t *)&dr, 1, 32, true);
+	ret = jtag_enqueue_write_dr((uint8_t *)&start_addr, 1, 32, true);
 	if (ret < 0) {
-		printf("Error, failed to queue DR write for address CMD\n");
+		E("Error, failed to queue DR write for address CMD\n");
+		return ret;
 	}
 	/* Write to IR to select data reg */
-	data = 0xb;
+	data = ARC_DATA_REG;
 	ret = jtag_enqueue_write_ir(&data, 1, 4, true);
 	if (ret < 0) {
-		printf("Error, failed to queue IR write for data CMD\n");
+		E("Error, failed to queue IR write for data CMD\n");
+		return ret;
 	}
-	/* Read data */
-	ret = jtag_enqueue_read_dr((uint8_t *)&dr, 1, 32, true);
+	/* ARC supports automatic address increment, so just keep executing DR reads */
+	for (size_t i = 0; i < wcount; i++) {
+		ret = jtag_enqueue_read_dr(&buf[i * 4], 1, 32, true);
+		if (ret < 0) {
+			E("Error, failed to queue DR read for data CMD\n");
+			return ret;
+		}
+		ret = jtag_execute_queue();
+		if (ret < 0) {
+			E("Error, failed to execute JTAG queue\n");
+			return ret;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Writes `wcount` words of device memory, starting at address `start_addr` from
+ * `buf`. This function is specific to the JTAG implementation on ARC HS4x.
+ */
+static int arc_jtag_write_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
+{
+	int ret;
+	uint8_t data;
+
+	/* Write to IR to select transaction CMD on TAP 1 */
+	data = ARC_TRANSACTION_CMD_REG;
+	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to queue DR read for data CMD\n");
+		E("Error, failed to queue IR write for transaction CMD\n");
+		return ret;
 	}
-	ret = jtag_execute_queue();
+	/* Select memory write transaction */
+	data = ARC_TRANSACTION_WRITE_MEM;
+	ret = jtag_enqueue_write_dr(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to execute JTAG queue\n");
+		E("Error, failed to queue DR write for transaction CMD\n");
+		return ret;
 	}
-	printf("Data read was 0x%08X\n", dr);
+	/* Write to IR to select address register on TAP 1 */
+	data = ARC_ADDRESS_REG;
+	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
+	if (ret < 0) {
+		E("Error, failed to queue IR write for address CMD\n");
+		return ret;
+	}
+	/* Write DR with address we want to access. */
+	ret = jtag_enqueue_write_dr((uint8_t *)&start_addr, 1, 32, false);
+	if (ret < 0) {
+		E("Error, failed to queue DR write for address CMD\n");
+		return ret;
+	}
+	/* Write to IR to select data reg */
+	data = ARC_DATA_REG;
+	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
+	if (ret < 0) {
+		E("Error, failed to queue IR write for data CMD\n");
+		return ret;
+	}
+	/* ARC supports automatic address increment, so just keep executing DR writes */
+	for (size_t i = 0; i < wcount; i++) {
+		/* Return to idle here so we run transaction */
+		ret = jtag_enqueue_write_dr(&buf[i * 4], 1, 32, true);
+		if (ret < 0) {
+			E("Error, failed to queue DR write for data CMD\n");
+			return ret;
+		}
+		ret = jtag_execute_queue();
+		if (ret < 0) {
+			E("Error, failed to execute JTAG queue\n");
+			return ret;
+		}
+	}
+	return 0;
+}
+
+void jlink_test(void)
+{
+	/* Read the postcode register */
+	int ret;
+	uint32_t data[10];
+
+	ret = arc_jtag_read_mem(0x80030060, (uint8_t *)data, 1);
+	if (ret < 0) {
+		E("Failed to read postcode register");
+		return;
+	}
+	printf("Postcode: 0x%08X\n", data[0]);
+	ret = arc_jtag_read_mem(0x80030400, (uint8_t *)data, 10);
+	if (ret < 0) {
+		E("Failed to read scratch registers");
+		return;
+	}
+	for (int i = 0; i < 10; i++) {
+		printf("Scratch[%d]: 0x%08X\n", i, data[i]);
+	}
+	/* Try writing to scratch registers */
+	for (int i = 0; i < 10; i++) {
+		data[i] = i;
+	}
+	ret = arc_jtag_write_mem(0x80030400, (uint8_t *)data, 10);
+	if (ret < 0) {
+		E("Failed to write scratch registers");
+		return;
+	}
+	ret = arc_jtag_read_mem(0x80030400, (uint8_t *)data, 10);
+	if (ret < 0) {
+		E("Failed to read scratch registers");
+		return;
+	}
+	for (int i = 0; i < 10; i++) {
+		printf("Scratch[%d]: 0x%08X\n", i, data[i]);
+	}
+	data[0] = 0xcafebabe;
+	ret = arc_jtag_write_mem(0x80030060, (uint8_t *)data, 1);
+	if (ret < 0) {
+		E("Failed to write postcode register");
+		return;
+	}
 }
 
 int jlink_init(int log_level, const char *serial_number)
@@ -445,6 +584,7 @@ int jlink_init(int log_level, const char *serial_number)
 	bool found_handle;
 	size_t conn_count;
 	int ret;
+	uint32_t idcode;
 
 	verbose = log_level;
 
@@ -504,7 +644,6 @@ int jlink_init(int log_level, const char *serial_number)
 		E("Failed to open JLink device: %s", jaylink_strerror(ret));
 		goto error;
 	}
-	jaylink_free_devices(devs, true);
 
 	memset(caps, 0, JAYLINK_DEV_EXT_CAPS_SIZE);
 	ret = jaylink_get_caps(devh, caps);
@@ -561,7 +700,26 @@ int jlink_init(int log_level, const char *serial_number)
 		}
 	}
 
+	/* Init JTAG queue and check the IDCODE register */
+	arc_jtag_init();
+	ret = jtag_go_idle();
+	if (ret < 0) {
+		E("Failed to enter run/test idle");
+		goto error;
+	}
+	ret = arc_jtag_read_idcode(&idcode);
+	if (ret < 0) {
+		E("Failed to read IDCODE");
+		goto error;
+	}
+	D(1, "IDCODE: 0x%08X", idcode);
+	if (idcode != ARC_IDCODE) {
+		E("IDCODE mismatch: expected 0x%08X, got 0x%08X", ARC_IDCODE, idcode);
+		ret = -ENODEV;
+		goto error;
+	}
 	jlink_test();
+	jaylink_free_devices(devs, true);
 	return 0;
 error:
 	if (devh) {
