@@ -14,11 +14,13 @@
  * length (4 bytes)
  */
 
-#include <libjaylink/libjaylink.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
+
+#include <libjaylink/libjaylink.h>
 
 #define D(level, fmt, ...)                                                                         \
 	if (verbose >= level) {                                                                    \
@@ -40,230 +42,398 @@ static struct jaylink_connection conn;
 
 #define DIV_ROUND_UP(val, div) ((((val) + ((div) - 1))) / (div))
 
-static int jlink_write_ir(uint8_t *data, int bit_len, bool return_to_idle)
-{
-	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
-	uint8_t	tdi = 0;
-	uint8_t dummy_tdo[DIV_ROUND_UP(bit_len, 8)];
-	int ret;
+struct tdo_buffer {
+	uint8_t *buf;
+	int bit_len;
+	struct tdo_buffer *next;
+};
 
-	/* Assume we start in run/test idle state */
-	/* Move to SHIFT IR state */
+/* Number of JTAG states we can queue transations between */
+#define JTAG_QUEUE_SIZE 256
+
+/* Tracks queued JTAG transactions */
+static struct {
+	uint8_t tms[JTAG_QUEUE_SIZE / 8];
+	uint8_t tdi[JTAG_QUEUE_SIZE / 8];
+	uint8_t tdo[JTAG_QUEUE_SIZE / 8];
+	uint8_t ir_len;
+	uint8_t bypass_dr_len;
+	uint8_t tap_count;
+	uint32_t queue_idx;
+	/* Linked list of output buffers */
+	struct tdo_buffer *tdo_buf_list;
+} jtag_queue;
+
+/*
+ * Performs a bitwise copy into `dst`. Copy is started from `src_offset` offset
+ * in `src`, to the bit offset `dst_offset` in `dst`. `bit_len` bits are copied.
+ */
+static void bitcopy(uint8_t *dst, uint8_t *src, int dst_offset, int src_offset, int bit_len)
+{
+	for (int i = 0; i < bit_len; i++) {
+		int dst_bit_off = (dst_offset + i) % 8;
+		int dst_byte_off = (dst_offset + i) / 8;
+		int src_bit_off = (src_offset + i) % 8;
+		int src_byte_off = (src_offset + i) / 8;
+
+		if (src[src_byte_off] & (1 << src_bit_off)) {
+			dst[dst_byte_off] |= (1 << dst_bit_off);
+		} else {
+			dst[dst_byte_off] &= ~(1 << dst_bit_off);
+		}
+	}
+}
+
+/*
+ * Zeros out the bits in `dst` starting from `dst_offset` to `bit_len` bits.
+ */
+static void bitzero(uint8_t *dst, int dst_offset, int bit_len)
+{
+	for (int i = 0; i < bit_len; i++) {
+		int bit_offset = (dst_offset + i) % 8;
+		int byte_offset = (dst_offset + i) / 8;
+
+		dst[byte_offset] &= ~(1 << bit_offset);
+	}
+}
+
+static int jtag_queue_transaction(uint8_t *tms, uint8_t *tdi, uint8_t *tdo, int bit_len)
+{
+	struct tdo_buffer *buf;
+
+	if (jtag_queue.queue_idx + bit_len > JTAG_QUEUE_SIZE) {
+		E("JTAG queue overflow");
+		return -ENOBUFS;
+	}
+
+	/* Enqueue the TMS, TDI, and TDO data */
+	if (tms) {
+		bitcopy(jtag_queue.tms, tms, jtag_queue.queue_idx, 0, bit_len);
+	} else {
+		bitzero(jtag_queue.tms, jtag_queue.queue_idx, bit_len);
+	}
+	if (tdi) {
+		bitcopy(jtag_queue.tdi, tdi, jtag_queue.queue_idx, 0, bit_len);
+	} else {
+		bitzero(jtag_queue.tdi, jtag_queue.queue_idx, bit_len);
+	}
+	buf = malloc(sizeof(struct tdo_buffer));
+	if (!buf) {
+		E("Failed to allocate memory for TDO buffer");
+		return -ENOMEM;
+	}
+	buf->buf = tdo;
+	buf->bit_len = bit_len;
+	buf->next = NULL;
+	/* Append this buffer to the linked list */
+	if (jtag_queue.tdo_buf_list == NULL) {
+		jtag_queue.tdo_buf_list = buf;
+	} else {
+		struct tdo_buffer *cur = jtag_queue.tdo_buf_list;
+
+		while (cur->next) {
+			cur = cur->next;
+		}
+		cur->next = buf;
+	}
+
+	jtag_queue.queue_idx += bit_len;
+
+	return 0;
+}
+
+static int jtag_enqueue_write_ir(uint8_t *data, int tap_idx, int bit_len, bool return_to_idle)
+{
+	int ret;
+	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
+	uint8_t tdi;
+
+	/* Enqueue transation into SHIFT-IR state. Assume we start in run/test idle */
 	tms[0] = 0x3;
-	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, 4, JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
+	ret = jtag_queue_transaction(tms, NULL, NULL, 3);
+	if (ret < 0) {
 		return ret;
 	}
-
+	/* Now, enqueue IR writes for the TAPs in bypass before this one */
 	memset(tms, 0, sizeof(tms));
-	/* Set last bit of tms to 1 to exit from SHIFT IR state */
-	tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
-	/* Send IR data */
-	ret = jaylink_jtag_io(devh, tms, data, dummy_tdo, bit_len,
-			      JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
-		return ret;
+	for (int i = 0; i < jtag_queue.tap_count; i++) {
+		if (i == tap_idx) {
+			/* Enqueue the IR write */
+			if (i == jtag_queue.tap_count - 1) {
+				/* Set high bit of TMS to exit IR write */
+				tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
+			} else {
+				tms[DIV_ROUND_UP(bit_len, 8) - 1] = 0;
+			}
+			ret = jtag_queue_transaction(tms, data, NULL, bit_len);
+			if (ret < 0) {
+				return ret;
+			}
+		} else {
+			/* Enqueue the bypass IR write */
+			if (jtag_queue.ir_len > (sizeof(tdi) * 8)) {
+				E("IR length exceeds buffer size");
+				return -EINVAL;
+			}
+			if (i == jtag_queue.tap_count - 1) {
+				/* Set high bit of TMS to exit IR write */
+				tms[0] = 1 << ((jtag_queue.ir_len - 1) % 8);
+			} else {
+				tms[0] = 0;
+			}
+			tdi = (1 << jtag_queue.ir_len) - 1;
+			ret = jtag_queue_transaction(tms, &tdi, NULL, jtag_queue.ir_len);
+			if (ret < 0) {
+				return ret;
+			}
+		}
 	}
-
-	memset(tms, 0, sizeof(tms));
-	/* Now in Exit1 IR, move back to idle or update-ir state */
 	tms[0] = 0x1;
-	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, return_to_idle ? 2 : 1,
-			      JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
-		return ret;
-	}
 
-	return 0;
+	return jtag_queue_transaction(tms, NULL, NULL, return_to_idle ? 2 : 1);
 }
 
-static int jlink_write_dr(uint8_t *data, int tap_idx, int bit_len, bool return_to_idle)
+static int jtag_enqueue_write_dr(uint8_t *data, int tap_idx, int bit_len, bool return_to_idle)
 {
-	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
-	uint8_t	tdi = 0;
-	uint8_t dummy_tdo[DIV_ROUND_UP(bit_len, 8)];
 	int ret;
+	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
+	uint8_t tdi;
 
-	/* Assume we start in run/test idle state */
-	/* Move to SHIFT DR state */
+	/* Enqueue transation into SHIFT-DR state. Assume we start in run/test idle */
 	tms[0] = 0x1;
-	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, 3, JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
+	ret = jtag_queue_transaction(tms, NULL, NULL, 3);
+	if (ret < 0) {
 		return ret;
 	}
-
+	/* Now, enqueue DR writes for the TAPs in bypass before this one */
 	memset(tms, 0, sizeof(tms));
-	/* clock extra cycles to shift data to our target tap */
-	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, tap_idx,
-			      JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
-		return ret;
+	for (int i = 0; i < jtag_queue.tap_count; i++) {
+		if (i == tap_idx) {
+			/* Enqueue the DR write */
+			if (i == jtag_queue.tap_count - 1) {
+				/* Set high bit of TMS to exit DR shift */
+				tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
+			} else {
+				tms[DIV_ROUND_UP(bit_len, 8) - 1] = 0;
+			}
+			ret = jtag_queue_transaction(tms, data, NULL, bit_len);
+			if (ret < 0) {
+				return ret;
+			}
+		} else {
+			/* Enqueue the bypass DR write */
+			if (jtag_queue.bypass_dr_len > (sizeof(tdi) * 8)) {
+				E("DR length exceeds buffer size");
+				return -EINVAL;
+			}
+			if (i == jtag_queue.tap_count - 1) {
+				/* Set high bit of TMS to exit DR shift */
+				tms[0] = 1 << ((jtag_queue.bypass_dr_len - 1) % 8);
+			} else {
+				tms[0] = 0;
+			}
+			tdi = (1 << jtag_queue.bypass_dr_len) - 1;
+			ret = jtag_queue_transaction(tms, &tdi, NULL, jtag_queue.bypass_dr_len);
+			if (ret < 0) {
+				return ret;
+			}
+		}
 	}
-	/* Set last bit of tms to 1 to exit from SHIFT DR state */
-	tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
-	/* Send DR data */
-	ret = jaylink_jtag_io(devh, tms, data, dummy_tdo, bit_len,
-			      JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
-		return ret;
-	}
-
-	memset(tms, 0, sizeof(tms));
-	/* Now in Exit1 DR, move back to idle or update-dr state */
 	tms[0] = 0x1;
-	ret = jaylink_jtag_io(devh, tms, &tdi, dummy_tdo, return_to_idle ? 2 : 1,
-			      JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
-		return ret;
-	}
 
-	return 0;
+	return jtag_queue_transaction(tms, NULL, NULL, return_to_idle ? 2 : 1);
 }
 
-static int jlink_read_dr(uint8_t *out, int tap_idx, int bit_len, bool return_to_idle)
+static int jtag_enqueue_read_dr(uint8_t *data, int tap_idx, int bit_len, bool return_to_idle)
 {
-	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
-	uint8_t tdi[DIV_ROUND_UP(bit_len, 8)];
-	uint8_t dummy_tdo;
 	int ret;
+	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
+	uint8_t tdi;
 
-	/* Assume we start in run/test idle state */
-	/* Move to SHIFT DR state */
+	/* Enqueue transation into SHIFT-DR state. Assume we start in run/test idle */
 	tms[0] = 0x1;
-	tdi[0] = 0x0;
-	ret = jaylink_jtag_io(devh, tms, tdi, &dummy_tdo, 3, JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
+	ret = jtag_queue_transaction(tms, NULL, NULL, 3);
+	if (ret < 0) {
 		return ret;
 	}
-
 	memset(tms, 0, sizeof(tms));
-	memset(tdi, 0, sizeof(tdi));
-	/* clock extra cycles to shift data from our target tap */
-	ret = jaylink_jtag_io(devh, tms, tdi, &dummy_tdo, tap_idx,
-			      JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
-		return ret;
+	/* Now, enqueue IR writes for the TAPs in bypass before this one */
+	for (int i = 0; i < jtag_queue.tap_count; i++) {
+		if (i == tap_idx) {
+			/* Enqueue the DR write */
+			if (i == jtag_queue.tap_count - 1) {
+				/* Set high bit of TMS to exit DR shift */
+				tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
+			} else {
+				tms[DIV_ROUND_UP(bit_len, 8) - 1] = 0;
+			}
+			ret = jtag_queue_transaction(tms, NULL, data, bit_len);
+			if (ret < 0) {
+				return ret;
+			}
+		} else {
+			/* Enqueue the bypass DR write */
+			if (jtag_queue.bypass_dr_len > (sizeof(tdi) * 8)) {
+				E("DR length exceeds buffer size");
+				return -EINVAL;
+			}
+			if (i == jtag_queue.tap_count - 1) {
+				/* Set high bit of TMS to exit DR shift */
+				tms[0] = 1 << ((jtag_queue.bypass_dr_len - 1) % 8);
+			} else {
+				tms[0] = 0;
+			}
+			tdi = (1 << jtag_queue.bypass_dr_len) - 1;
+			ret = jtag_queue_transaction(tms, &tdi, NULL, jtag_queue.bypass_dr_len);
+			if (ret < 0) {
+				return ret;
+			}
+		}
 	}
-
-	/* Set last bit of tms to 1 to exit from SHIFT DR state */
-	tms[DIV_ROUND_UP(bit_len, 8) - 1] = 1 << ((bit_len - 1) % 8);
-	/* Read DR data */
-	ret = jaylink_jtag_io(devh, tms, tdi, out, bit_len,
-			      JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
-		return ret;
-	}
-
-	memset(tms, 0, sizeof(tms));
-	/* Now in Exit1 DR, move back to idle or update-dr state */
 	tms[0] = 0x1;
-	ret = jaylink_jtag_io(devh, tms, tdi, &dummy_tdo, return_to_idle ? 2 : 1,
+
+	return jtag_queue_transaction(tms, NULL, NULL, return_to_idle ? 2 : 1);
+}
+
+static int jtag_execute_queue(void)
+{
+	int ret;
+	int bit_idx = 0;
+	struct tdo_buffer *tdo_buf = jtag_queue.tdo_buf_list;
+	struct tdo_buffer *next_buf;
+
+	/* Execute the queued transactions */
+	ret = jaylink_jtag_io(devh, jtag_queue.tms, jtag_queue.tdi,
+			      jtag_queue.tdo, jtag_queue.queue_idx,
 			      JAYLINK_JTAG_VERSION_3);
 	if (ret != JAYLINK_OK) {
+		E("Failed to execute JTAG queue: %s", jaylink_strerror(ret));
 		return ret;
 	}
-
+	/* Copy out TDO data */
+	while (tdo_buf) {
+		if (tdo_buf->buf) {
+			bitcopy(tdo_buf->buf, jtag_queue.tdo, 0, bit_idx, tdo_buf->bit_len);
+		}
+		bit_idx += tdo_buf->bit_len;
+		next_buf = tdo_buf->next;
+		free(tdo_buf);
+		tdo_buf = next_buf;
+	}
+	if (bit_idx != jtag_queue.queue_idx) {
+		E("TDO data length mismatch: expected %d, got %d", jtag_queue.queue_idx, bit_idx);
+		return -EINVAL;
+	}
+	/* Reset queue state */
+	jtag_queue.queue_idx = 0;
+	jtag_queue.tdo_buf_list = NULL;
 	return 0;
 }
 
 static int jlink_go_idle(void)
 {
 	uint8_t tms = 0x1f;
-	uint8_t tdi = 0;
-	uint8_t tdo;
 	int ret;
 
 	/* Move to run/test idle state */
-	ret = jaylink_jtag_io(devh, &tms, &tdi, &tdo, 6, JAYLINK_JTAG_VERSION_3);
-	if (ret != JAYLINK_OK) {
+	ret = jtag_queue_transaction(&tms, NULL, NULL, 6);
+	if (ret != 0) {
+		return ret;
+	}
+	ret = jtag_execute_queue();
+	if (ret != 0) {
 		return ret;
 	}
 
 	return 0;
 }
 
+static void jtag_init_arc(void)
+{
+	/*
+	 * In the future, we could replace this with a function that
+	 * detects the TAPs in the chain and sets the bypass length
+	 * accordingly. For now, we hardcode the values for the ARC TAPs.
+	 */
+	jtag_queue.ir_len = 4;
+	jtag_queue.bypass_dr_len = 1;
+	jtag_queue.tap_count = 5;
+	jtag_queue.queue_idx = 0;
+	jtag_queue.tdo_buf_list = NULL;
+	memset(jtag_queue.tms, 0, sizeof(jtag_queue.tms));
+	memset(jtag_queue.tdi, 0, sizeof(jtag_queue.tdi));
+	memset(jtag_queue.tdo, 0, sizeof(jtag_queue.tdo));
+}
 
 static void jlink_test(void)
 {
 	int ret;
+	uint8_t data;
+	uint32_t dr;
 
-	/* ARC expects 16 bits of 0xff after IR reg, because IR scan chain is 20 bits */
-	uint8_t ir[] = {0xcf, 0xff, 0xf};
-	/* We are scanning for IDCODE at first entry in chain */
-	uint8_t dr[8] = {0};
+	jtag_init_arc();
 
 	ret = jlink_go_idle();
 	if (ret < 0) {
 		printf("Error, failed to enter run/test idle\n");
 	}
-	/* Write IR to read IDCODE */
-	ret = jlink_write_ir(ir, 20, true);
-	if (ret < 0) {
-		printf("Error, failed to write IDCODE reg\n");
-	}
-	/* Read IDCODE */
-	ret = jlink_read_dr(dr, 1, 32, true);
-	if (ret < 0) {
-		printf("Error, failed to read idcode reg\n");
-	}
-	printf("Idcode reg was 0x%04X\n", *(uint32_t *)dr);
-	ir[0] = 0x9f;
-	ret = jlink_write_ir(ir, 20, false);
-	if (ret < 0) {
-		printf("Error, failed to write transaction address reg\n");
-	}
-	dr[0] = 0x3;
-	/* Write DR to issue NOP */
-	/* Note we send 3 extra bits after the 4 bit value for the bypass regs */
-	ret = jlink_write_dr(dr, 1, 4 + 3, true);
-	if (ret < 0) {
-		printf("Error, failed to write transaction address dr\n");
-	}
 
-	/* Try to read from a memory address on ARC */
-	/* Write IR to select transaction command */
-	ir[0] = 0x9f;
-	ret = jlink_write_ir(ir, 20, false);
+	data = 0xc;
+	/* Write IR to read IDCode */
+	ret = jtag_enqueue_write_ir(&data, 0, 4, true);
 	if (ret < 0) {
-		printf("Error, failed to write transaction address reg\n");
+		printf("Error, failed to queue IR write for IDCODE\n");
 	}
-	dr[0] = 0x4;
-	/* Note we send 3 extra bits after the 4 bit value for the bypass regs */
-	/* Write DR to issue memory write */
-	ret = jlink_write_dr(dr, 1, 4 + 3, false);
+	/* Read IDCode */
+	ret = jtag_enqueue_read_dr((uint8_t *)&dr, 0, 32, true);
 	if (ret < 0) {
-		printf("Error, failed to write transaction address dr\n");
+		printf("Error, failed to queue DR read for IDCODE\n");
 	}
-	ir[0] = 0xaf;
-	/* Write IR to select address */
-	ret = jlink_write_ir(ir, 20, false);
+	ret = jtag_execute_queue();
 	if (ret < 0) {
-		printf("Error, failed to write memory address reg\n");
+		printf("Error, failed to execute JTAG queue\n");
 	}
-	/* Return to idle here so the transaction executes */
-	/* Write DR with address we want to access */
-	/* Postcode reg 0x80030060 */
-	dr[0] = 0x60;
-	dr[1] = 0x0;
-	dr[2] = 0x3;
-	dr[3] = 0x80;
-	/* Note we send 3 extra bits after the 32 bit value for the bypass regs */
-	ret = jlink_write_dr(dr, 1, 32 + 3, true);
+	printf("IDCODE was 0x%08X\n", dr);
+	/* Write to IR to select transaction CMD on TAP 1 */
+	data = 0x9;
+	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to write memory address dr\n");
+		printf("Error, failed to queue IR write for transaction CMD\n");
 	}
-	ir[0] = 0xbf;
-	/* Write IR to select data reg */
-	ret = jlink_write_ir(ir, 20, true);
+	/* Select memory read transactions */
+	data = 0x4;
+	ret = jtag_enqueue_write_dr(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to write data address reg\n");
+		printf("Error, failed to queue DR write for transaction CMD\n");
 	}
-	/* Read Data */
-	ret = jlink_read_dr(dr, 1, 32, true);
+	/* Write to IR to select address on TAP 1 */
+	data = 0xa;
+	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
 	if (ret < 0) {
-		printf("Error, failed to read data address reg\n");
+		printf("Error, failed to queue IR write for address CMD\n");
 	}
-	printf("DR read was 0x%04X\n", *(uint32_t *)dr);
+	/* Write DR with address we want to access. Return to idle so transaction runs */
+	dr = 0x80030060; /* postcode reg */
+	ret = jtag_enqueue_write_dr((uint8_t *)&dr, 1, 32, true);
+	if (ret < 0) {
+		printf("Error, failed to queue DR write for address CMD\n");
+	}
+	/* Write to IR to select data reg */
+	data = 0xb;
+	ret = jtag_enqueue_write_ir(&data, 1, 4, true);
+	if (ret < 0) {
+		printf("Error, failed to queue IR write for data CMD\n");
+	}
+	/* Read data */
+	ret = jtag_enqueue_read_dr((uint8_t *)&dr, 1, 32, true);
+	if (ret < 0) {
+		printf("Error, failed to queue DR read for data CMD\n");
+	}
+	ret = jtag_execute_queue();
+	if (ret < 0) {
+		printf("Error, failed to execute JTAG queue\n");
+	}
+	printf("Data read was 0x%08X\n", dr);
 }
 
 int jlink_init(int log_level, const char *serial_number)
