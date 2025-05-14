@@ -7,6 +7,8 @@
 #ifndef ARC_JTAG_H_
 #define ARC_JTAG_H_
 
+#include <stdint.h>
+
 struct jtag_init_data {
 	int verbose;
 	const char *serial_number;

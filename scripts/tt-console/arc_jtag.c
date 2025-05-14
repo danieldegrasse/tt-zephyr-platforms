@@ -422,8 +422,11 @@ int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t len)
 	int ret;
 	uint8_t data;
 	uint32_t aligned_addr = start_addr & ~0x3;
-	uint32_t offset = start_addr & 0x3;
+	uint32_t unaligned_start_cnt = (start_addr & 0x3) ? 4 - (start_addr & 0x3) : 0;
+	uint32_t aligned_cnt = (len - unaligned_start_cnt) & ~0x3;
+	uint32_t unaligned_end_cnt = len - (aligned_cnt + unaligned_start_cnt);
 	uint8_t temp[4];
+	size_t cpy_idx = 0;
 
 	/* Write to IR to select transaction CMD on TAP 1 */
 	data = ARC_TRANSACTION_CMD_REG;
@@ -459,8 +462,8 @@ int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t len)
 		E("Error, failed to queue IR write for data CMD\n");
 		return ret;
 	}
-	if (offset) {
-		/* Read the first word, but only the last `4 - offset` bytes */
+	if (unaligned_start_cnt) {
+		/* Read the first word, but only the last `unaligned_start_cnt` bytes */
 		ret = jtag_enqueue_read_dr(temp, 1, 32, true);
 		if (ret < 0) {
 			E("Error, failed to queue DR read for data CMD\n");
@@ -471,29 +474,12 @@ int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t len)
 			E("Error, failed to execute JTAG queue\n");
 			return ret;
 		}
-		memcpy(buf, &temp[offset], 4 - offset);
-		buf += 4 - offset;
-		len -= 4 - offset;
+		memcpy(&buf[cpy_idx], &temp[4 - unaligned_start_cnt], unaligned_start_cnt);
+		cpy_idx += unaligned_start_cnt;
 	}
 	/* ARC supports automatic address increment, so just keep executing DR reads */
-	for (size_t i = 0; i < len; i += 4) {
-		if (len - i < 4) {
-			/* Read the last word, but only the first `len - i` bytes */
-			ret = jtag_enqueue_read_dr(temp, 1, 32, true);
-			if (ret < 0) {
-				E("Error, failed to queue DR read for data CMD\n");
-				return ret;
-			}
-			ret = jtag_execute_queue();
-			if (ret < 0) {
-				E("Error, failed to execute JTAG queue\n");
-				return ret;
-			}
-			memcpy(&buf[i], temp, len - i);
-			break;
-		}
-		/* Otherwise, read directly into buffer */
-		ret = jtag_enqueue_read_dr(&buf[i], 1, 32, true);
+	for (; cpy_idx < (unaligned_start_cnt + aligned_cnt); cpy_idx += 4) {
+		ret = jtag_enqueue_read_dr(&buf[cpy_idx], 1, 32, true);
 		if (ret < 0) {
 			E("Error, failed to queue DR read for data CMD\n");
 			return ret;
@@ -503,6 +489,20 @@ int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t len)
 			E("Error, failed to execute JTAG queue\n");
 			return ret;
 		}
+	}
+	if (unaligned_end_cnt) {
+		/* Read the last word, but only the first `unaligend_end_cnt` bytes */
+		ret = jtag_enqueue_read_dr(temp, 1, 32, true);
+		if (ret < 0) {
+			E("Error, failed to queue DR read for data CMD\n");
+			return ret;
+		}
+		ret = jtag_execute_queue();
+		if (ret < 0) {
+			E("Error, failed to execute JTAG queue\n");
+			return ret;
+		}
+		memcpy(&buf[cpy_idx], temp, unaligned_end_cnt);
 	}
 	return 0;
 }
@@ -515,50 +515,70 @@ int arc_jtag_write_mem(uint32_t start_addr, const uint8_t *buf, size_t len)
 {
 	int ret;
 	uint8_t data;
+	uint32_t aligned_addr = start_addr & ~0x3;
+	uint32_t unaligned_start_cnt = (start_addr & 0x3) ? 4 - (start_addr & 0x3) : 0;
+	uint32_t aligned_cnt = (len - unaligned_start_cnt) & ~0x3;
+	uint32_t unaligned_end_cnt = len - (aligned_cnt + unaligned_start_cnt);
+	uint8_t temp[4];
+	size_t cpy_idx = 0;
 
-	if ((len % 4 != 0) || (start_addr % 4 != 0)) {
-		E("Error, write length and alignment must be a multiple of 4");
-		return -EINVAL;
+	if (unaligned_start_cnt) {
+		/* Use a read-modify-write algorithm to set the first word */
+		ret = arc_jtag_read_mem(aligned_addr, temp, 4);
+		if (ret < 0) {
+			E("Error, failed to read memory for unaligned write\n");
+			return ret;
+		}
+		memcpy(&temp[4 - unaligned_start_cnt], &buf[cpy_idx], unaligned_start_cnt);
+		ret = arc_jtag_write_mem(aligned_addr, temp, 4);
+		if (ret < 0) {
+			E("Error, failed to write memory for unaligned write\n");
+			return ret;
+		}
+		aligned_addr += 4;
+		cpy_idx += unaligned_start_cnt;
 	}
 
-	/* Write to IR to select transaction CMD on TAP 1 */
-	data = ARC_TRANSACTION_CMD_REG;
-	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
-	if (ret < 0) {
-		E("Error, failed to queue IR write for transaction CMD\n");
-		return ret;
-	}
-	/* Select memory write transaction */
-	data = ARC_TRANSACTION_WRITE_MEM;
-	ret = jtag_enqueue_write_dr(&data, 1, 4, false);
-	if (ret < 0) {
-		E("Error, failed to queue DR write for transaction CMD\n");
-		return ret;
-	}
-	/* Write to IR to select address register on TAP 1 */
-	data = ARC_ADDRESS_REG;
-	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
-	if (ret < 0) {
-		E("Error, failed to queue IR write for address CMD\n");
-		return ret;
-	}
-	/* Write DR with address we want to access. */
-	ret = jtag_enqueue_write_dr((uint8_t *)&start_addr, 1, 32, false);
-	if (ret < 0) {
-		E("Error, failed to queue DR write for address CMD\n");
-		return ret;
-	}
-	/* Write to IR to select data reg */
-	data = ARC_DATA_REG;
-	ret = jtag_enqueue_write_ir(&data, 1, 4, false);
-	if (ret < 0) {
-		E("Error, failed to queue IR write for data CMD\n");
-		return ret;
+	if (aligned_cnt) {
+		/* Write to IR to select transaction CMD on TAP 1 */
+		data = ARC_TRANSACTION_CMD_REG;
+		ret = jtag_enqueue_write_ir(&data, 1, 4, false);
+		if (ret < 0) {
+			E("Error, failed to queue IR write for transaction CMD\n");
+			return ret;
+		}
+		/* Select memory write transaction */
+		data = ARC_TRANSACTION_WRITE_MEM;
+		ret = jtag_enqueue_write_dr(&data, 1, 4, false);
+		if (ret < 0) {
+			E("Error, failed to queue DR write for transaction CMD\n");
+			return ret;
+		}
+		/* Write to IR to select address register on TAP 1 */
+		data = ARC_ADDRESS_REG;
+		ret = jtag_enqueue_write_ir(&data, 1, 4, false);
+		if (ret < 0) {
+			E("Error, failed to queue IR write for address CMD\n");
+			return ret;
+		}
+		/* Write DR with address we want to access. */
+		ret = jtag_enqueue_write_dr((uint8_t *)&aligned_addr, 1, 32, false);
+		if (ret < 0) {
+			E("Error, failed to queue DR write for address CMD\n");
+			return ret;
+		}
+		/* Write to IR to select data reg */
+		data = ARC_DATA_REG;
+		ret = jtag_enqueue_write_ir(&data, 1, 4, false);
+		if (ret < 0) {
+			E("Error, failed to queue IR write for data CMD\n");
+			return ret;
+		}
 	}
 	/* ARC supports automatic address increment, so just keep executing DR writes */
-	for (size_t i = 0; i < len; i += 4) {
+	for (; cpy_idx < (unaligned_start_cnt + aligned_cnt); cpy_idx += 4) {
 		/* Return to idle here so we run transaction */
-		ret = jtag_enqueue_write_dr(&buf[i], 1, 32, true);
+		ret = jtag_enqueue_write_dr(&buf[cpy_idx], 1, 32, true);
 		if (ret < 0) {
 			E("Error, failed to queue DR write for data CMD\n");
 			return ret;
@@ -566,6 +586,20 @@ int arc_jtag_write_mem(uint32_t start_addr, const uint8_t *buf, size_t len)
 		ret = jtag_execute_queue();
 		if (ret < 0) {
 			E("Error, failed to execute JTAG queue\n");
+			return ret;
+		}
+	}
+	if (unaligned_end_cnt) {
+		/* Write the last `unaligned_end_cnt` bytes using read-modify-write */
+		ret = arc_jtag_read_mem(aligned_addr + aligned_cnt, temp, 4);
+		if (ret < 0) {
+			E("Error, failed to read memory for unaligned write\n");
+			return ret;
+		}
+		memcpy(temp, &buf[cpy_idx], unaligned_end_cnt);
+		ret = arc_jtag_write_mem(aligned_addr + aligned_cnt, temp, 4);
+		if (ret < 0) {
+			E("Error, failed to write memory for unaligned write\n");
 			return ret;
 		}
 	}
@@ -717,6 +751,7 @@ int arc_jtag_init(void *data)
 		ret = -ENODEV;
 		goto error;
 	}
+
 	jaylink_free_devices(devs, true);
 	return 0;
 error:

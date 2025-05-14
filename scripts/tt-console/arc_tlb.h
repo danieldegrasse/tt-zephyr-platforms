@@ -7,6 +7,8 @@
 #ifndef ARC_TLB_H_
 #define ARC_TLB_H_
 
+#include <stdint.h>
+
 struct tlb_init_data {
 	int verbose;
 	uint8_t tlb_id;

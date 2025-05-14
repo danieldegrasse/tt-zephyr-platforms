@@ -81,7 +81,7 @@ struct console {
 	struct termios term;
 };
 
-/* Definition of functions used to access ARC memory */
+/* Definition of functions used to access memory */
 struct mem_access_driver {
 	int (*start)(void *init_data);
 	int (*read)(uint32_t addr, uint8_t *buf, size_t len);

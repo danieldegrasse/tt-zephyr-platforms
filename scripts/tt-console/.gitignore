@@ -15,8 +15,9 @@ configure
 depcomp
 install-sh
 missing
-libjtag*
+libmemdriver*
 libtool
 ltmain.sh
 stamp-h1
 tt-console
+tt-console-memtest
