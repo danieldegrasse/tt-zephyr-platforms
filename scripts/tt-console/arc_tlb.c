@@ -153,16 +153,16 @@ struct tlb_data {
 static struct tlb_data _tlb_data;
 static int verbose;
 
-#define D(level, fmt, ...)                                                                         \
-	if (verbose >= level) {                                                                    \
-		printf("D: %s(): " fmt "\n", __func__, ##__VA_ARGS__);                             \
+#define D(level, fmt, ...)                                                      \
+	if (verbose >= level) {                                                 \
+		printf("D: %s(): " fmt "\r\n", __func__, ##__VA_ARGS__);        \
 	}
 
-#define E(fmt, ...) fprintf(stderr, "E: %s(): " fmt "\n", __func__, ##__VA_ARGS__)
+#define E(fmt, ...) fprintf(stderr, "E: %s(): " fmt "\r\n", __func__, ##__VA_ARGS__)
 
-#define I(fmt, ...)                                                                                \
-	if (verbose >= 0) {                                                                        \
-		printf(fmt "\n", ##__VA_ARGS__);                                                   \
+#define I(fmt, ...)                                                             \
+	if (verbose >= 0) {                                                     \
+		printf(fmt "\r\n", ##__VA_ARGS__);                              \
 	}
 
 static const char *tlb2m2str(volatile struct tlb_2m *reg)

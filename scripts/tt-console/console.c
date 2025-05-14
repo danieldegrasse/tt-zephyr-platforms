@@ -100,16 +100,16 @@ static struct tlb_init_data tlb_init_data = {
 	.tlb_id = BH_2M_TLB_UC_DYNAMIC_START + 1,
 };
 
-#define D(level, fmt, ...)                                                                         \
-	if (verbose >= level) {                                                                    \
-		printf("D: %s(): " fmt "\n", __func__, ##__VA_ARGS__);                             \
+#define D(level, fmt, ...)                                                      \
+	if (verbose >= level) {                                                 \
+		printf("D: %s(): " fmt "\r\n", __func__, ##__VA_ARGS__);        \
 	}
 
-#define E(fmt, ...) fprintf(stderr, "E: %s(): " fmt "\n", __func__, ##__VA_ARGS__)
+#define E(fmt, ...) fprintf(stderr, "E: %s(): " fmt "\r\n", __func__, ##__VA_ARGS__)
 
-#define I(fmt, ...)                                                                                \
-	if (verbose >= 0) {                                                                        \
-		printf(fmt "\n", ##__VA_ARGS__);                                                   \
+#define I(fmt, ...)                                                             \
+	if (verbose >= 0) {                                                     \
+		printf(fmt "\r\n", ##__VA_ARGS__);                              \
 	}
 
 static void console_init(struct console *cons)
@@ -269,7 +269,7 @@ static inline size_t vuart_space(struct mem_access_driver *driver, struct consol
 		return 0;
 	}
 
-	return tt_vuart_buf_size(vuart.rx_head, vuart.rx_tail);
+	return vuart.rx_cap - tt_vuart_buf_size(vuart.rx_head, vuart.rx_tail);
 }
 
 static inline void vuart_putc(struct mem_access_driver *driver, struct console *cons, int ch)
@@ -415,7 +415,7 @@ static int loop(struct mem_access_driver *driver)
 				if (vuart_space(driver, &_cons) > 0) {
 					vuart_putc(driver, &_cons, ch);
 				} else {
-					ungetc(ch, stdin);
+					E("vuart buffer full");
 				}
 			}
 		}
