@@ -22,6 +22,8 @@
 
 #include <libjaylink/libjaylink.h>
 
+#include "arc_jtag.h"
+
 #define D(level, fmt, ...)                                                                         \
 	if (verbose >= level) {                                                                    \
 		printf("D: %s(): " fmt "\n", __func__, ##__VA_ARGS__);                             \
@@ -85,7 +87,7 @@ static struct {
  * Performs a bitwise copy into `dst`. Copy is started from `src_offset` offset
  * in `src`, to the bit offset `dst_offset` in `dst`. `bit_len` bits are copied.
  */
-static void bitcopy(uint8_t *dst, uint8_t *src, int dst_offset, int src_offset, int bit_len)
+static void bitcopy(uint8_t *dst, const uint8_t *src, int dst_offset, int src_offset, int bit_len)
 {
 	for (int i = 0; i < bit_len; i++) {
 		int dst_bit_off = (dst_offset + i) % 8;
@@ -114,7 +116,7 @@ static void bitzero(uint8_t *dst, int dst_offset, int bit_len)
 	}
 }
 
-static int jtag_queue_transaction(uint8_t *tms, uint8_t *tdi, uint8_t *tdo, int bit_len)
+static int jtag_queue_transaction(const uint8_t *tms, const uint8_t *tdi, uint8_t *tdo, int bit_len)
 {
 	struct tdo_buffer *buf;
 
@@ -210,7 +212,7 @@ static int jtag_enqueue_write_ir(uint8_t *data, int tap_idx, int bit_len, bool r
 	return jtag_queue_transaction(tms, NULL, NULL, return_to_idle ? 2 : 1);
 }
 
-static int jtag_enqueue_write_dr(uint8_t *data, int tap_idx, int bit_len, bool return_to_idle)
+static int jtag_enqueue_write_dr(const uint8_t *data, int tap_idx, int bit_len, bool return_to_idle)
 {
 	int ret;
 	uint8_t tms[DIV_ROUND_UP(bit_len, 8)];
@@ -412,13 +414,16 @@ static int arc_jtag_read_idcode(uint32_t *idcode)
 }
 
 /*
- * Reads `wcount` words of device memory, starting at address `start_addr` into
+ * Reads `len` bytes of device memory, starting at address `start_addr` into
  * `buf`. This function is specific to the JTAG implementation on ARC HS4x.
  */
-static int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
+int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t len)
 {
 	int ret;
 	uint8_t data;
+	uint32_t aligned_addr = start_addr & ~0x3;
+	uint32_t offset = start_addr & 0x3;
+	uint8_t temp[4];
 
 	/* Write to IR to select transaction CMD on TAP 1 */
 	data = ARC_TRANSACTION_CMD_REG;
@@ -442,7 +447,7 @@ static int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
 		return ret;
 	}
 	/* Write DR with address we want to access. Return to idle so transaction runs */
-	ret = jtag_enqueue_write_dr((uint8_t *)&start_addr, 1, 32, true);
+	ret = jtag_enqueue_write_dr((uint8_t *)&aligned_addr, 1, 32, true);
 	if (ret < 0) {
 		E("Error, failed to queue DR write for address CMD\n");
 		return ret;
@@ -454,9 +459,41 @@ static int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
 		E("Error, failed to queue IR write for data CMD\n");
 		return ret;
 	}
+	if (offset) {
+		/* Read the first word, but only the last `4 - offset` bytes */
+		ret = jtag_enqueue_read_dr(temp, 1, 32, true);
+		if (ret < 0) {
+			E("Error, failed to queue DR read for data CMD\n");
+			return ret;
+		}
+		ret = jtag_execute_queue();
+		if (ret < 0) {
+			E("Error, failed to execute JTAG queue\n");
+			return ret;
+		}
+		memcpy(buf, &temp[offset], 4 - offset);
+		buf += 4 - offset;
+		len -= 4 - offset;
+	}
 	/* ARC supports automatic address increment, so just keep executing DR reads */
-	for (size_t i = 0; i < wcount; i++) {
-		ret = jtag_enqueue_read_dr(&buf[i * 4], 1, 32, true);
+	for (size_t i = 0; i < len; i += 4) {
+		if (len - i < 4) {
+			/* Read the last word, but only the first `len - i` bytes */
+			ret = jtag_enqueue_read_dr(temp, 1, 32, true);
+			if (ret < 0) {
+				E("Error, failed to queue DR read for data CMD\n");
+				return ret;
+			}
+			ret = jtag_execute_queue();
+			if (ret < 0) {
+				E("Error, failed to execute JTAG queue\n");
+				return ret;
+			}
+			memcpy(&buf[i], temp, len - i);
+			break;
+		}
+		/* Otherwise, read directly into buffer */
+		ret = jtag_enqueue_read_dr(&buf[i], 1, 32, true);
 		if (ret < 0) {
 			E("Error, failed to queue DR read for data CMD\n");
 			return ret;
@@ -471,13 +508,18 @@ static int arc_jtag_read_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
 }
 
 /*
- * Writes `wcount` words of device memory, starting at address `start_addr` from
+ * Writes `len` bytes of device memory, starting at address `start_addr` from
  * `buf`. This function is specific to the JTAG implementation on ARC HS4x.
  */
-static int arc_jtag_write_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
+int arc_jtag_write_mem(uint32_t start_addr, const uint8_t *buf, size_t len)
 {
 	int ret;
 	uint8_t data;
+
+	if ((len % 4 != 0) || (start_addr % 4 != 0)) {
+		E("Error, write length and alignment must be a multiple of 4");
+		return -EINVAL;
+	}
 
 	/* Write to IR to select transaction CMD on TAP 1 */
 	data = ARC_TRANSACTION_CMD_REG;
@@ -514,9 +556,9 @@ static int arc_jtag_write_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
 		return ret;
 	}
 	/* ARC supports automatic address increment, so just keep executing DR writes */
-	for (size_t i = 0; i < wcount; i++) {
+	for (size_t i = 0; i < len; i += 4) {
 		/* Return to idle here so we run transaction */
-		ret = jtag_enqueue_write_dr(&buf[i * 4], 1, 32, true);
+		ret = jtag_enqueue_write_dr(&buf[i], 1, 32, true);
 		if (ret < 0) {
 			E("Error, failed to queue DR write for data CMD\n");
 			return ret;
@@ -530,63 +572,19 @@ static int arc_jtag_write_mem(uint32_t start_addr, uint8_t *buf, size_t wcount)
 	return 0;
 }
 
-void jlink_test(void)
-{
-	/* Read the postcode register */
-	int ret;
-	uint32_t data[10];
-
-	ret = arc_jtag_read_mem(0x80030060, (uint8_t *)data, 1);
-	if (ret < 0) {
-		E("Failed to read postcode register");
-		return;
-	}
-	printf("Postcode: 0x%08X\n", data[0]);
-	ret = arc_jtag_read_mem(0x80030400, (uint8_t *)data, 10);
-	if (ret < 0) {
-		E("Failed to read scratch registers");
-		return;
-	}
-	for (int i = 0; i < 10; i++) {
-		printf("Scratch[%d]: 0x%08X\n", i, data[i]);
-	}
-	/* Try writing to scratch registers */
-	for (int i = 0; i < 10; i++) {
-		data[i] = i;
-	}
-	ret = arc_jtag_write_mem(0x80030400, (uint8_t *)data, 10);
-	if (ret < 0) {
-		E("Failed to write scratch registers");
-		return;
-	}
-	ret = arc_jtag_read_mem(0x80030400, (uint8_t *)data, 10);
-	if (ret < 0) {
-		E("Failed to read scratch registers");
-		return;
-	}
-	for (int i = 0; i < 10; i++) {
-		printf("Scratch[%d]: 0x%08X\n", i, data[i]);
-	}
-	data[0] = 0xcafebabe;
-	ret = arc_jtag_write_mem(0x80030060, (uint8_t *)data, 1);
-	if (ret < 0) {
-		E("Failed to write postcode register");
-		return;
-	}
-}
-
-int arc_jtag_init(int log_level, const char *serial_number)
+int arc_jtag_init(void *data)
 {
 	size_t num_devs;
 	struct jaylink_device **devs;
 	struct jaylink_device *selected_device = NULL;
 	struct jaylink_connection conns[JAYLINK_MAX_CONNECTIONS];
+	struct jtag_init_data *init_data = (struct jtag_init_data *)data;
 	bool found_handle;
 	size_t conn_count;
 	int ret;
 	uint32_t idcode;
 
-	verbose = log_level;
+	verbose = init_data->verbose;
 
 	ret = jaylink_init(&ctx);
 	if (ret != JAYLINK_OK) {
@@ -607,11 +605,11 @@ int arc_jtag_init(int log_level, const char *serial_number)
 		return -1;
 	}
 
-	if (serial_number) {
+	if (init_data->serial_number) {
 		uint32_t serial, test_serial;
-		ret = jaylink_parse_serial_number(serial_number, &serial);
+		ret = jaylink_parse_serial_number(init_data->serial_number, &serial);
 		if (ret != JAYLINK_OK) {
-			E("Invalid serial number: %s", serial_number);
+			E("Invalid serial number: %s", init_data->serial_number);
 			goto error;
 		}
 		for (size_t i = 0; i < num_devs; i++) {
@@ -622,12 +620,13 @@ int arc_jtag_init(int log_level, const char *serial_number)
 			}
 			if (test_serial == serial) {
 				selected_device = devs[i];
-				I("Found JLink device with serial number: %s", serial_number);
+				I("Found JLink device with serial number: %s",
+					init_data->serial_number);
 				break;
 			}
 		}
 		if (selected_device == NULL) {
-			E("No JLink device found with serial number: %s", serial_number);
+			E("No JLink device found with serial number: %s", init_data->serial_number);
 			goto error;
 		}
 	} else if (num_devs > 1) {
@@ -718,7 +717,6 @@ int arc_jtag_init(int log_level, const char *serial_number)
 		ret = -ENODEV;
 		goto error;
 	}
-	jlink_test();
 	jaylink_free_devices(devs, true);
 	return 0;
 error:
