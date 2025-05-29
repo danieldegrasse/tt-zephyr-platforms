@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 import argparse
 import logging
+import time
 import shutil
 import socket
 import sys
@@ -294,8 +295,9 @@ class RTTHelper:
         # Start a new socket connection
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(("localhost", self._rtt_port))
+        timeout = time.time() + 10  # Hard timeout of 10 seconds to dump RTT data
         sock.settimeout(0.5)
-        while True:
+        while True and time.time() < timeout:
             try:
                 data = sock.recv(2048)
                 print(data.decode())
