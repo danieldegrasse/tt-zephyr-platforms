@@ -25,11 +25,11 @@ config FLASH_MSPI_NOR_LAYOUT_PAGE_SIZE
 	  Other options include the 32K-byte erase size (32768), the sector
 	  size (4096), or any non-zero multiple of the sector size.
 
-config FLASH_MSPI_NOR_RUNTIME_PROBE
-	bool "Probe flash details at runtime"
+config FLASH_MSPI_NOR_SFDP_PROBE
+	bool "Probe flash using SFDP"
 	help
-	  If enabled, the driver will probe the flash device's JEDEC ID at
-	  runtime, and used that to determine the command set and flash size.
+	  If enabled, the driver probe the SFDP table to determine how
+	  to interface with the flash device.
 
 endif # FLASH_MSPI_NOR
 

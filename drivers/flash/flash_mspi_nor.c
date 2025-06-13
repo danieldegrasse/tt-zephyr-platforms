@@ -15,7 +15,7 @@
 #include "flash_mspi_nor_quirks.h"
 
 
-#if defined(CONFIG_FLASH_MSPI_NOR_RUNTIME_PROBE)
+#if defined(CONFIG_FLASH_MSPI_NOR_SFDP_PROBE)
 #define FLASH_DATA(dev) (((struct flash_mspi_nor_data *)(dev->data))->flash_data)
 #else
 #define FLASH_DATA(dev) (((const struct flash_mspi_nor_config *)(dev->config))->flash_data)
@@ -443,8 +443,8 @@ static void api_page_layout(const struct device *dev,
 }
 #endif /* CONFIG_FLASH_PAGE_LAYOUT */
 
-#if defined(CONFIG_FLASH_JESD216_API)
-static int api_sfdp_read(const struct device *dev, off_t addr, void *dest,
+#if defined(CONFIG_FLASH_MSPI_NOR_SFDP_PROBE) || defined(CONFIG_FLASH_JESD216_API)
+static int sfdp_read(const struct device *dev, off_t addr, void *dest,
 			 size_t size)
 {
 	const struct flash_mspi_nor_config *dev_config = dev->config;
@@ -453,12 +453,6 @@ static int api_sfdp_read(const struct device *dev, off_t addr, void *dest,
 
 	if (size == 0) {
 		return 0;
-	}
-
-	rc = acquire(dev);
-
-	if (rc < 0) {
-		return rc;
 	}
 
 	if (FLASH_DATA(dev).jedec_cmds->sfdp.force_single) {
@@ -472,8 +466,9 @@ static int api_sfdp_read(const struct device *dev, off_t addr, void *dest,
 	}
 
 	flash_mspi_command_set(dev, &FLASH_DATA(dev).jedec_cmds->sfdp);
-	dev_data->xfer.addr_length += 1;
-	dev_data->packet.address   = addr << 8;
+	dev_data->xfer.rx_dummy = 0;
+	dev_data->xfer.addr_length++;
+	dev_data->packet.address   = addr;
 	dev_data->packet.data_buf  = dest;
 	dev_data->packet.num_bytes = size;
 	rc = mspi_transceive(dev_config->bus, &dev_config->mspi_id,
@@ -482,6 +477,23 @@ static int api_sfdp_read(const struct device *dev, off_t addr, void *dest,
 		printk("Read SFDP xfer failed: %d\n", rc);
 		return rc;
 	}
+
+	return rc;
+}
+#endif
+
+#if defined(CONFIG_FLASH_JESD216_API)
+static int api_sfdp_read(const struct device *dev, off_t addr, void *dest,
+			 size_t size)
+{
+	int rc;
+
+	rc = acquire(dev);
+	if (rc < 0) {
+		return rc;
+	}
+
+	rc = sfdp_read(dev, addr, dest, size);
 
 	release(dev);
 
@@ -638,6 +650,137 @@ static int gpio_reset(const struct device *dev)
 }
 #endif
 
+#if defined(CONFIG_FLASH_MSPI_NOR_SFDP_PROBE)
+
+static int process_sfdp_bfp(const struct device *dev,
+	const struct jesd216_param_header *php,
+	const struct jesd216_bfp *bfp)
+{
+	int rc = 0;
+	enum jesd216_mode_type mode_type;
+	struct jesd216_instr res;
+
+	/* Get flash size */
+	FLASH_DATA(dev).flash_size = jesd216_bfp_density(bfp)/ 8;
+	/* Get read instruction */
+	switch (FLASH_DATA(dev).dev_cfg.io_mode) {
+	case MSPI_IO_MODE_SINGLE:
+		res.instr = 0x3;
+		res.wait_states = 0;
+		res.mode_clocks = 0;
+		mode_type = JESD216_MODE_111;
+		break;
+	case MSPI_IO_MODE_DUAL_1_1_2:
+		mode_type = JESD216_MODE_112;
+		break;
+	case MSPI_IO_MODE_DUAL_1_2_2:
+		mode_type = JESD216_MODE_122;
+		break;
+	case MSPI_IO_MODE_QUAD_1_1_4:
+		mode_type = JESD216_MODE_114;
+		break;
+	case MSPI_IO_MODE_QUAD_1_4_4:
+		mode_type = JESD216_MODE_144;
+		break;
+	case MSPI_IO_MODE_OCTAL_1_1_8:
+		mode_type = JESD216_MODE_118;
+		break;
+	case MSPI_IO_MODE_OCTAL_1_8_8:
+		mode_type = JESD216_MODE_188;
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	rc = jesd216_bfp_read_support(php, bfp, mode_type, &res);
+	if (rc < 0) {
+		LOG_ERR("No support for read instruction in selected I/O mode (%d)", rc);
+		return rc;
+	}
+
+	/* Populate read command */
+	FLASH_DATA(dev).jedec_cmds->read.cmd = res.instr;
+	FLASH_DATA(dev).jedec_cmds->read.cmd_length = 3;
+	FLASH_DATA(dev).jedec_cmds->read.rx_dummy = res.wait_states + res.mode_clocks;
+
+	/* Find the 4K sector erase command */
+	FLASH_DATA(dev).jedec_cmds->sector_erase.cmd = (bfp->dw1 >> 8) & 0xff;
+	FLASH_DATA(dev).jedec_cmds->sector_erase.cmd_length = 1;
+
+	if (FLASH_DATA(dev).jedec_cmds->sector_erase.cmd == 0xff) {
+		LOG_ERR("SFDP BFP: No 4K sector erase command found");
+		return -ENOTSUP;
+	}
+
+	return rc;
+}
+
+static int process_sfdp(const struct device *dev)
+{
+	/* For runtime we need to read the SFDP table, identify the
+	 * BFP block, and process it.
+	 */
+	const uint8_t decl_nph = 2;
+	union {
+		/* We only process BFP so use one parameter block */
+		uint8_t raw[JESD216_SFDP_SIZE(decl_nph)];
+		struct jesd216_sfdp_header sfdp;
+	} u_header;
+	const struct jesd216_sfdp_header *hp = &u_header.sfdp;
+	const struct jesd216_param_header *php;
+	const struct jesd216_param_header *phpe;
+	uint32_t magic;
+	int rc;
+
+	/* Read SFDP block */
+	rc = sfdp_read(dev, 0, u_header.raw, sizeof(u_header.raw));
+	if (rc < 0) {
+		LOG_ERR("SFDP read failed: %d", rc);
+		return rc;
+	}
+	magic = jesd216_sfdp_magic(hp);
+	if (magic != JESD216_SFDP_MAGIC) {
+		LOG_ERR("SFDP magic %08x invalid", magic);
+		return -EINVAL;
+	}
+	LOG_INF("%s: SFDP v %u.%u AP %x with %u PH", dev->name,
+		hp->rev_major, hp->rev_minor, hp->access, 1 + hp->nph);
+	php = hp->phdr;
+	phpe = php + MIN(decl_nph, 1 + hp->nph);
+
+	while (php != phpe) {
+		uint16_t id = jesd216_param_id(php);
+
+		LOG_INF("PH%u: %04x rev %u.%u: %u DW @ %x",
+			(int)(php - hp->phdr), id, php->rev_major, php->rev_minor,
+			php->len_dw, jesd216_param_addr(php));
+		if (id == JESD216_SFDP_PARAM_ID_BFP) {
+			union {
+				uint32_t dw[MIN(php->len_dw, 23)];
+				struct jesd216_bfp bfp;
+			} u_param;
+			const struct jesd216_bfp *bfp = &u_param.bfp;
+
+			rc = sfdp_read(dev, jesd216_param_addr(php),
+				u_param.dw, sizeof(u_param.dw));
+			if (rc == 0) {
+				rc = process_sfdp_bfp(dev, php, bfp);
+			}
+
+			if (rc != 0) {
+				break;
+			}
+		} else {
+			LOG_ERR("Unsupported SFDP parameter ID: %04x", id);
+		}
+		++php;
+	}
+
+	return rc;
+}
+
+#endif
+
 static int flash_chip_init(const struct device *dev)
 {
 	const struct flash_mspi_nor_config *dev_config = dev->config;
@@ -710,38 +853,10 @@ static int flash_chip_init(const struct device *dev)
 		}
 	}
 
-#if defined(CONFIG_FLASH_MSPI_NOR_RUNTIME_PROBE)
-	int i;
+#if defined(CONFIG_FLASH_MSPI_NOR_SFDP_PROBE)
+	rc = process_sfdp(dev);
+#endif
 
-	for (i = 0; i < mspi_nor_devs_count; i++) {
-		if (memcmp(id, &mspi_nor_devs[i].jedec_id,
-			 sizeof(id)) == 0) {
-			FLASH_DATA(dev).jedec_cmds = &mspi_nor_devs[i].jedec_cmds;
-			FLASH_DATA(dev).quirks = &mspi_nor_devs[i].quirks;
-			FLASH_DATA(dev).dw15_qer = mspi_nor_devs[i].dw15_qer;
-			FLASH_DATA(dev).dev_cfg.io_mode = mspi_nor_devs[i].dev_cfg.io_mode;
-			FLASH_DATA(dev).dev_cfg.data_rate = mspi_nor_devs[i].dev_cfg.data_rate;
-			FLASH_DATA(dev).dev_cfg.endian = mspi_nor_devs[i].dev_cfg.endian;
-			FLASH_DATA(dev).dev_cfg.dqs_enable = mspi_nor_devs[i].dev_cfg.dqs_enable;
-			FLASH_DATA(dev).flash_size = mspi_nor_devs[i].flash_size;
-			FLASH_DATA(dev).layout.pages_count = mspi_nor_devs[i].flash_size /
-				mspi_nor_devs[i].page_size;
-			FLASH_DATA(dev).layout.pages_size = mspi_nor_devs[i].page_size;
-			memcpy(&FLASH_DATA(dev).jedec_id,
-			       &mspi_nor_devs[i].jedec_id,
-			       sizeof(FLASH_DATA(dev).jedec_id));
-			LOG_DBG("Found device: %02x %02x %02x",
-			 id[0], id[1], id[2]);
-			break;
-		}
-	}
-	if (i == mspi_nor_devs_count) {
-		LOG_ERR("Device not found: %02x %02x %02x",
-			id[0], id[1], id[2]);
-		return -ENODEV;
-	}
-#else
-	/* Validate JEDEC ID */
 	if (memcmp(id, FLASH_DATA(dev).jedec_id, sizeof(id)) != 0) {
 		LOG_ERR("JEDEC ID mismatch, read: %02x %02x %02x, "
 			"expected: %02x %02x %02x",
@@ -751,7 +866,6 @@ static int flash_chip_init(const struct device *dev)
 			FLASH_DATA(dev).jedec_id[2]);
 		return -ENODEV;
 	}
-#endif
 
 #if defined(CONFIG_MSPI_XIP)
 	/* Enable XIP access for this chip if specified so in DT. */
@@ -896,7 +1010,7 @@ BUILD_ASSERT((FLASH_SIZE_INST(inst) % CONFIG_FLASH_MSPI_NOR_LAYOUT_PAGE_SIZE) ==
 
 #define FLASH_DATA_INIT(inst)							\
 	.flash_data = {								\
-		.jedec_cmds = FLASH_CMDS(inst),					\
+		.jedec_cmds = (struct flash_mspi_nor_cmds *)FLASH_CMDS(inst),	\
 		.quirks = FLASH_QUIRKS(inst),					\
 		.dev_cfg = MSPI_DEVICE_CONFIG_DT_INST(inst),			\
 		.jedec_id = DT_INST_PROP_OR(inst, jedec_id, {0}),		\
@@ -930,11 +1044,11 @@ BUILD_ASSERT((FLASH_SIZE_INST(inst) % CONFIG_FLASH_MSPI_NOR_LAYOUT_PAGE_SIZE) ==
 				/ 1000,						\
 		.reset_recovery_us = DT_INST_PROP_OR(inst, t_reset_recovery, 0)	\
 				   / 1000,))					\
-	COND_CODE_1(CONFIG_FLASH_MSPI_NOR_RUNTIME_PROBE, (),			\
+	COND_CODE_1(CONFIG_FLASH_MSPI_NOR_SFDP_PROBE, (),			\
 		(FLASH_DATA_INIT(inst)))					\
 	};									\
 	static struct flash_mspi_nor_data dev##inst##_data = {			\
-	COND_CODE_1(CONFIG_FLASH_MSPI_NOR_RUNTIME_PROBE,			\
+	COND_CODE_1(CONFIG_FLASH_MSPI_NOR_SFDP_PROBE,			        \
 		(FLASH_DATA_INIT(inst)), ())					\
 	};									\
 	FLASH_PAGE_LAYOUT_CHECK(inst)						\
