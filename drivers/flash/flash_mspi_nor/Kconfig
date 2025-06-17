@@ -1,15 +1,13 @@
-# Copyright (c) 2024 Ambiq Micro Inc. <www.ambiq.com>
+# Copyright (c) 2025 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
-
-menu "MSPI flash device driver"
 
 menuconfig FLASH_MSPI_NOR
 	bool "Generic MSPI NOR Flash"
 	default y
 	depends on DT_HAS_JEDEC_MSPI_NOR_ENABLED
 	select FLASH_MSPI
-	select FLASH_HAS_EXPLICIT_ERASE
 	select FLASH_HAS_PAGE_LAYOUT
+	select FLASH_HAS_EXPLICIT_ERASE
 	select FLASH_JESD216
 	select GPIO if $(dt_compat_any_has_prop,$(DT_COMPAT_JEDEC_MSPI_NOR),reset-gpios)
 
@@ -31,6 +29,13 @@ config FLASH_MSPI_NOR_RUNTIME_PROBE
 	  If enabled, the driver will probe the flash device's JEDEC ID at
 	  runtime, and used that to determine the command set and flash size.
 
-endif # FLASH_MSPI_NOR
+if FLASH_MSPI_NOR_RUNTIME_PROBE
 
-endmenu
+config FLASH_MSPI_NOR_MICRON
+	bool "Micron MSPI NOR flash support"
+	help
+	  Support Micron MSPI NOR flash devices during runtime probing.
+
+endif # FLASH_MSPI_NOR_RUNTIME_PROBE
+
+endif # FLASH_MSPI_NOR

@@ -6,7 +6,7 @@ if FLASH
 menu "Flash drivers"
 
 # zephyr-keep-sorted-start
-rsource "Kconfig.mspi"
+rsource "flash_mspi_nor/Kconfig"
 # zephyr-keep-sorted-stop
 
 endmenu
