@@ -1,0 +1,3 @@
+FILL(0x00);
+. += CONFIG_ROM_START_OFFSET;
+. = ALIGN(4);

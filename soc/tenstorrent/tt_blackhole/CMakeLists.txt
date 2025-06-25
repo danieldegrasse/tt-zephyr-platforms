@@ -23,5 +23,7 @@ if(CONFIG_SOC_TT_BLACKHOLE_SMC)
   zephyr_library()
   zephyr_library_sources(soc.c)
 
+  # Pads image with 0x0 for MCUBoot
+  zephyr_linker_sources(ROM_START SORT_KEY 0x0romstart rom_start.ld)
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/tt_blackhole_smc.ld CACHE INTERNAL "")
 endif()

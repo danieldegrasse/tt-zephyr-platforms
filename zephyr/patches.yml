@@ -176,3 +176,14 @@ patches:
       Already upstream change (merged after v4.1.0) to add bus recovery support for the DesignWare
       I2C controller. This can simply be removed once we upgrade to v4.2.0. Also contains
       follow-up changes that are already upstream for error checking, etc.
+  - path: zephyr/mcuboot-ram-load-support.patch
+    sha256sum: 53cb856008ca7f8e914e8bf00a322911d5d65d19c815418b3854b8c88e6228f4
+    module: zephyr
+    author: Daniel DeGrasse
+    email: ddegrasse@tenstorrent.com
+    date: 2025-01-01
+    upstreamable: true
+    merge-pr: https://github.com/zephyrproject-rtos/zephyr/pull/85254/files
+    comments: |
+      This patch adds support for loading mcuboot images from RAM, which is useful for
+      testing and development purposes.
