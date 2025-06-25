@@ -177,7 +177,7 @@ patches:
       I2C controller. This can simply be removed once we upgrade to v4.2.0. Also contains
       follow-up changes that are already upstream for error checking, etc.
   - path: zephyr/mcuboot-ram-load-support.patch
-    sha256sum: f6690bfc6ec03374078fd84cf060b42d4341c79201d2bc6d44cc8eab2dfaa879
+    sha256sum: 1622b05229170ad42828a891181f03324e231a7705eb566aaa4d1522c810a67a
     module: zephyr
     author: Daniel DeGrasse
     email: ddegrasse@tenstorrent.com
