@@ -61,7 +61,7 @@
 			 */
 			slot0_partition: partition@20000 {
 				label = "image-0";
-				reg = <0x20000 DT_SIZE_M(8)>;
+				reg = <0x20000 DT_SIZE_K(512)>;
 			};
 
 			/*
@@ -71,9 +71,9 @@
 			 * The partition is not accessed directly, but
 			 * rather is read via the tt-boot-fs APIs
 			 */
-			data_partition: partition@820000 {
+			data_partition: partition@a0000 {
 				label = "data";
-				reg = <0x820000 DT_SIZE_M(1)>;
+				reg = <0xa0000 DT_SIZE_M(1)>;
 			};
 
 			/*
@@ -82,9 +82,9 @@
 			 * and is also tagged as the recovery image in tt-boot-fs.
 			 * Therefore, either the bootrom or MCUBoot can load this image.
 			 */
-			slot1_partition: partition@920000 {
+			slot1_partition: partition@1a0000 {
 				label = "image-1";
-				reg = <0x920000 DT_SIZE_M(8)>;
+				reg = <0x1a0000 DT_SIZE_K(512)>;
 			};
 		};
 	};

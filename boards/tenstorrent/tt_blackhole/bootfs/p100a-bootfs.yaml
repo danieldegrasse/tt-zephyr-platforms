@@ -28,7 +28,7 @@ images:
   # This is the image magic for MCUBOOT
   - name: smcmagic
     binary: $ROOT/zephyr/blobs/tt_blackhole_smc_trailer.bin
-    source: "0x81f000"
+    source: "0x9f000"
 
   - name: ethfwcfg
     binary: $ROOT/zephyr/blobs/tt_blackhole_erisc_params.bin
@@ -66,5 +66,5 @@ images:
 fail_over_image:
   name: failover
   binary: $BUILD_DIR/recovery/zephyr/zephyr.bin
-  source: "0x920000"
+  source: "0x1a0000"
   offset: 0x10000000

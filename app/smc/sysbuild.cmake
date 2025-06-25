@@ -65,6 +65,9 @@ if(NOT "${BOARD_REVISION}" STREQUAL "galaxy")
   )
 endif()
 
+# Make sure MCUBoot is build only
+set_target_properties(mcuboot PROPERTIES BUILD_ONLY 1)
+
 # ======== Defines for filesystem generation ========
 set(OUTPUT_FWBUNDLE ${CMAKE_BINARY_DIR}/update.fwbundle)
 
