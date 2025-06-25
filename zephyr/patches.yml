@@ -177,7 +177,7 @@ patches:
       I2C controller. This can simply be removed once we upgrade to v4.2.0. Also contains
       follow-up changes that are already upstream for error checking, etc.
   - path: zephyr/mcuboot-ram-load-support.patch
-    sha256sum: 53cb856008ca7f8e914e8bf00a322911d5d65d19c815418b3854b8c88e6228f4
+    sha256sum: f6690bfc6ec03374078fd84cf060b42d4341c79201d2bc6d44cc8eab2dfaa879
     module: zephyr
     author: Daniel DeGrasse
     email: ddegrasse@tenstorrent.com
@@ -187,3 +187,26 @@ patches:
     comments: |
       This patch adds support for loading mcuboot images from RAM, which is useful for
       testing and development purposes.
+  - path: mcuboot/boot-zephyr-add-support-for-booting-ARC-processors.patch
+    sha256sum: 3fdf3a6a5d5aaf65914d8a0e5356cca992a97402457d375adbb953489bbbe2db
+    module: mcuboot
+    author: Daniel DeGrasse
+    email: ddegrasse@tenstorrent.com
+    date: 2025-06-25
+    upstreamable: true
+    merge-pr: https://github.com/mcu-tools/mcuboot/pull/2356
+    comments: |
+      Adds support for booting ARC processors in MCUBoot. Needed to boot SMC
+      with MCUBoot.
+  - path: mcuboot/boot-zephyr-add-support-for-revert-mode-with-ramload.patch
+    sha256sum: 64af571387e4b26ac084f827ae44818ffc314821281e3ca3a4bb8dc2ce20cc0c
+    module: mcuboot
+    author: Daniel DeGrasse
+    email: ddegrasse@tenstorrent.com
+    date: 2025-06-25
+    upstreamable: true
+    merge-pr: https://github.com/mcu-tools/mcuboot/pull/2197
+    comments: |
+      Adds support for revert mode with RAM load in MCUBoot. This allows us to
+      load an image in test mode, and then revert to the previous image
+      if the image fails.

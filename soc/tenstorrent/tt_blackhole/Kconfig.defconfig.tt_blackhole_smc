@@ -77,6 +77,11 @@ config GPIO
 config HAS_FLASH_LOAD_OFFSET
 	default y
 
+# We need to use a ROM start offset of 0x400- this is because the vector table
+# is at the start of the image and must  be 1KB aligned
+config ROM_START_OFFSET
+	default 0x400 if BOOTLOADER_MCUBOOT
+
 # Needed for octal SPI. WH doesn't actually have this but BH will.
 # config CONFIG_SPI_EXTENDED_MODES
 #	default y

@@ -22,6 +22,7 @@ import json
 import shutil
 import tarfile
 import tempfile
+import numpy
 
 try:
     from yaml import CSafeLoader as SafeLoader
@@ -707,14 +708,7 @@ def cksum(data: bytes):
     if len(data) < 4:
         return 0
 
-    for i in range(0, len(data), 4):
-        value = int.from_bytes(data[i:][:4], "little")
-        calculated_checksum += value
-
-    calculated_checksum &= 0xFFFFFFFF
-
-    return calculated_checksum
-
+    return numpy.frombuffer(data, dtype=numpy.uint32).sum().item() & 0xFFFFFFFF
 
 def mkfs(path: Path, env={"$ROOT": str(ROOT)}, hex=False) -> bytes:
     fi = None
