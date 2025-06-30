@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2024 Nordic Semiconductor ASA
+ * Copyright (c) 2025 Tenstorrent AI ULC
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,11 +20,8 @@
 #include <zephyr/drivers/mspi/mspi_dw.h>
 
 #include "mspi_dw.h"
-#include "mspi_dw_vendor_specific.h"
 
 LOG_MODULE_REGISTER(mspi_dw, CONFIG_MSPI_LOG_LEVEL);
-
-#define DUMMY_BYTE 0xAA
 
 #if defined(CONFIG_MSPI_XIP)
 struct xip_params {
@@ -51,6 +49,7 @@ struct mspi_dw_data {
 	uint32_t ctrlr0;
 	uint32_t spi_ctrlr0;
 	uint32_t baudr;
+	uint32_t rx_sample_dly;
 
 #if defined(CONFIG_MSPI_XIP)
 	uint32_t xip_freq;
@@ -107,7 +106,7 @@ DEFINE_MM_REG_RD(rxflr,		0x24)
 DEFINE_MM_REG_RD(sr,		0x28)
 DEFINE_MM_REG_WR(imr,		0x2c)
 DEFINE_MM_REG_RD(isr,		0x30)
-DEFINE_MM_REG_RD(icr,		0x48)
+DEFINE_MM_REG_RD(risr,		0x34)
 DEFINE_MM_REG_RD_WR(dr,		0x60)
 DEFINE_MM_REG_WR(rx_sample_dly,	0xf0)
 DEFINE_MM_REG_WR(spi_ctrlr0,	0xf4)
@@ -121,6 +120,8 @@ DEFINE_MM_REG_WR(xip_write_incr_inst,	0x140)
 DEFINE_MM_REG_WR(xip_write_wrap_inst,	0x144)
 DEFINE_MM_REG_WR(xip_write_ctrl,	0x148)
 #endif
+
+#include "mspi_dw_vendor_specific.h"
 
 static void tx_data(const struct device *dev,
 		    const struct mspi_xfer_packet *packet)
@@ -156,6 +157,9 @@ static void tx_data(const struct device *dev,
 		write_dr(dev, data);
 
 		if (buf_pos >= buf_end) {
+			/* Set the threshold to 0 to get the next interrupt
+			 * when the FIFO is completely emptied.
+			 */
 			write_txftlr(dev, 0);
 			break;
 		}
@@ -169,35 +173,38 @@ static void tx_data(const struct device *dev,
 	dev_data->buf_pos = (uint8_t *)buf_pos;
 }
 
-static bool make_rx_cycles(const struct device *dev)
+static bool tx_dummy_bytes(const struct device *dev)
 {
 	struct mspi_dw_data *dev_data = dev->data;
 	const struct mspi_dw_config *dev_config = dev->config;
+	uint8_t fifo_room = dev_config->tx_fifo_depth_minus_1 + 1
+			  - FIELD_GET(TXFLR_TXTFL_MASK, read_txflr(dev));
 	uint16_t dummy_bytes = dev_data->dummy_bytes;
-	/* See tx_data(). */
-	uint32_t room = 1;
-	uint8_t tx_fifo_depth = dev_config->tx_fifo_depth_minus_1 + 1;
+	const uint8_t dummy_val = 0;
+
+	if (dummy_bytes > fifo_room) {
+		dev_data->dummy_bytes = dummy_bytes - fifo_room;
+
+		do {
+			write_dr(dev, dummy_val);
+		} while (--fifo_room);
+
+		return false;
+	}
 
 	do {
-		write_dr(dev, DUMMY_BYTE);
+		write_dr(dev, dummy_val);
+	} while (--dummy_bytes);
 
-		--dummy_bytes;
-		if (!dummy_bytes) {
-			dev_data->dummy_bytes = 0;
-			return true;
-		}
+	/* Set the threshold to 0 to get the next interrupt when the FIFO is
+	 * completely emptied.
+	 */
+	write_txftlr(dev, 0);
 
-		if (--room == 0) {
-			room = tx_fifo_depth
-			     - FIELD_GET(TXFLR_TXTFL_MASK, read_txflr(dev));
-		}
-	} while (room);
-
-	dev_data->dummy_bytes = dummy_bytes;
-	return false;
+	return true;
 }
 
-static void read_rx_fifo(const struct device *dev,
+static bool read_rx_fifo(const struct device *dev,
 			 const struct mspi_xfer_packet *packet)
 {
 	struct mspi_dw_data *dev_data = dev->data;
@@ -228,9 +235,8 @@ static void read_rx_fifo(const struct device *dev,
 			}
 
 			if (buf_pos >= buf_end) {
-				dev_data->bytes_to_discard = bytes_to_discard;
 				dev_data->buf_pos = buf_pos;
-				return;
+				return true;
 			}
 		}
 
@@ -247,6 +253,7 @@ static void read_rx_fifo(const struct device *dev,
 
 	dev_data->bytes_to_discard = bytes_to_discard;
 	dev_data->buf_pos = buf_pos;
+	return false;
 }
 
 static void mspi_dw_isr(const struct device *dev)
@@ -254,37 +261,57 @@ static void mspi_dw_isr(const struct device *dev)
 	struct mspi_dw_data *dev_data = dev->data;
 	const struct mspi_xfer_packet *packet =
 		&dev_data->xfer.packets[dev_data->packets_done];
-	uint32_t int_status = read_isr(dev);
+	bool finished = false;
 
-	if (int_status & ISR_RXFIS_BIT) {
-		read_rx_fifo(dev, packet);
-	}
+	if (packet->dir == MSPI_TX) {
+		if (dev_data->buf_pos < dev_data->buf_end) {
+			tx_data(dev, packet);
+		} else {
+			/* It may happen that at this point the controller is
+			 * still shifting out the last frame (the last interrupt
+			 * occurs when the TX FIFO is empty). Wait if it signals
+			 * that it is busy.
+			 */
+			while (read_sr(dev) & SR_BUSY_BIT) {
+			}
 
-	if (dev_data->buf_pos >= dev_data->buf_end) {
-		write_imr(dev, 0);
-		/* It may happen that at this point the controller is still
-		 * shifting out the last frame (the last interrupt occurs when
-		 * the TX FIFO is empty). Wait if it signals that it is busy.
-		 */
-		while (read_sr(dev) & SR_BUSY_BIT) {
+			finished = true;
 		}
-
-		k_sem_give(&dev_data->finished);
 	} else {
-		if (int_status & ISR_TXEIS_BIT) {
-			if (dev_data->dummy_bytes) {
-				if (make_rx_cycles(dev)) {
+		uint32_t int_status = read_isr(dev);
+
+		do {
+			if (int_status & ISR_RXFIS_BIT) {
+				if (read_rx_fifo(dev, packet)) {
+					finished = true;
+					break;
+				}
+
+				if (read_risr(dev) & RISR_RXOIR_BIT) {
+					finished = true;
+					break;
+				}
+
+				int_status = read_isr(dev);
+			}
+
+			if (int_status & ISR_TXEIS_BIT) {
+				if (tx_dummy_bytes(dev)) {
 					write_imr(dev, IMR_RXFIM_BIT);
 				}
-			} else {
-				tx_data(dev, packet);
+
+				int_status = read_isr(dev);
 			}
-		}
+		} while (int_status);
 	}
 
-	read_icr(dev);
-	vendor_specific_irq_clear(dev);
+	if (finished) {
+		write_imr(dev, 0);
 
+		k_sem_give(&dev_data->finished);
+	}
+
+	vendor_specific_irq_clear(dev);
 }
 
 static int api_config(const struct mspi_dt_spec *spec)
@@ -380,7 +407,7 @@ static bool apply_cmd_length(struct mspi_dw_data *dev_data, uint32_t cmd_length)
 						   SPI_CTRLR0_INST_L16);
 		break;
 	default:
-		LOG_ERR("Command length %d not supported", cmd_length);
+		LOG_ERR("Command length %u not supported", cmd_length);
 		return false;
 	}
 
@@ -390,6 +417,11 @@ static bool apply_cmd_length(struct mspi_dw_data *dev_data, uint32_t cmd_length)
 static bool apply_addr_length(struct mspi_dw_data *dev_data,
 			      uint32_t addr_length)
 {
+	if (addr_length > 4) {
+		LOG_ERR("Address length %u not supported", addr_length);
+		return false;
+	}
+
 	dev_data->spi_ctrlr0 |= FIELD_PREP(SPI_CTRLR0_ADDR_L_MASK,
 					   addr_length * 2);
 
@@ -501,7 +533,7 @@ static bool apply_xip_cmd_length(const struct mspi_dw_data *dev_data,
 					  XIP_WRITE_CTRL_INST_L16);
 		break;
 	default:
-		LOG_ERR("Command length %d not supported", cmd_length);
+		LOG_ERR("Command length %u not supported", cmd_length);
 		return false;
 	}
 
@@ -512,6 +544,11 @@ static bool apply_xip_addr_length(const struct mspi_dw_data *dev_data,
 				  struct xip_ctrl *ctrl)
 {
 	uint8_t addr_length = dev_data->xip_params_active.addr_length;
+
+	if (addr_length > 4) {
+		LOG_ERR("Address length %u not supported", addr_length);
+		return false;
+	}
 
 	ctrl->read |= FIELD_PREP(XIP_CTRL_ADDR_L_MASK, addr_length * 2);
 	ctrl->write |= FIELD_PREP(XIP_WRITE_CTRL_ADDR_L_MASK, addr_length * 2);
@@ -759,13 +796,9 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 				       (dev_data->xip_enabled != 0),
 				       (false));
 	unsigned int key;
-	uint8_t tx_fifo_threshold;
 	uint32_t packet_frames;
 	uint32_t imr;
 	int rc = 0;
-
-	/* Make sure controller is disabled. */
-	write_ssienr(dev, 0);
 
 	if (packet->num_bytes == 0 &&
 	    dev_data->xfer.cmd_length == 0 &&
@@ -774,10 +807,11 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 	}
 
 	dev_data->dummy_bytes = 0;
+	dev_data->bytes_to_discard = 0;
 
-	dev_data->ctrlr0 &= ~CTRLR0_TMOD_MASK
-			 &  ~CTRLR0_DFS_MASK
-			 &  ~CTRLR0_DFS32_MASK;
+	dev_data->ctrlr0 &= ~(CTRLR0_TMOD_MASK)
+			  & ~(CTRLR0_DFS_MASK)
+			  & ~(CTRLR0_DFS32_MASK);
 
 	dev_data->spi_ctrlr0 &= ~SPI_CTRLR0_WAIT_CYCLES_MASK;
 
@@ -819,7 +853,6 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 						   dev_data->xfer.tx_dummy);
 
 		write_rxftlr(dev, 0);
-		tx_fifo_threshold = dev_config->tx_fifo_threshold;
 	} else {
 		uint32_t tmod;
 		uint8_t rx_fifo_threshold;
@@ -836,31 +869,34 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 		    (dev_data->xfer.cmd_length != 0 ||
 		     dev_data->xfer.addr_length != 0)) {
 			uint32_t rx_total_bytes;
+			uint32_t dummy_cycles = dev_data->xfer.rx_dummy;
 
 			dev_data->bytes_to_discard = dev_data->xfer.cmd_length
-						   + dev_data->xfer.addr_length;
+						   + dev_data->xfer.addr_length
+						   + dummy_cycles / 8;
 			rx_total_bytes = dev_data->bytes_to_discard
 				       + packet->num_bytes;
 
-			dev_data->dummy_bytes = packet->num_bytes;
+			dev_data->dummy_bytes = dummy_cycles / 8
+					      + packet->num_bytes;
 
 			imr = IMR_TXEIM_BIT | IMR_RXFIM_BIT;
 			tmod = CTRLR0_TMOD_TX_RX;
-			tx_fifo_threshold = dev_config->tx_fifo_threshold;
 			/* For standard SPI, only 1-byte frames are used. */
 			rx_fifo_threshold = MIN(rx_total_bytes - 1,
 						dev_config->rx_fifo_threshold);
 		} else {
 			imr = IMR_RXFIM_BIT;
 			tmod = CTRLR0_TMOD_RX;
-			tx_fifo_threshold = 0;
 			rx_fifo_threshold = MIN(packet_frames - 1,
 						dev_config->rx_fifo_threshold);
+
+			dev_data->spi_ctrlr0 |=
+				FIELD_PREP(SPI_CTRLR0_WAIT_CYCLES_MASK,
+					   dev_data->xfer.rx_dummy);
 		}
 
 		dev_data->ctrlr0 |= FIELD_PREP(CTRLR0_TMOD_MASK, tmod);
-		dev_data->spi_ctrlr0 |= FIELD_PREP(SPI_CTRLR0_WAIT_CYCLES_MASK,
-						   dev_data->xfer.rx_dummy);
 
 		write_rxftlr(dev, FIELD_PREP(RXFTLR_RFT_MASK,
 					     rx_fifo_threshold));
@@ -889,6 +925,7 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 		: 0);
 	write_spi_ctrlr0(dev, dev_data->spi_ctrlr0);
 	write_baudr(dev, dev_data->baudr);
+	write_rx_sample_dly(dev, dev_data->rx_sample_dly);
 	if (dev_data->spi_ctrlr0 & (SPI_CTRLR0_SPI_DDR_EN_BIT |
 				    SPI_CTRLR0_INST_DDR_EN_BIT)) {
 		write_txd_drive_edge(dev, dev_data->baudr / 4);
@@ -904,23 +941,49 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 	dev_data->buf_pos = packet->data_buf;
 	dev_data->buf_end = &packet->data_buf[packet->num_bytes];
 
-	if ((imr & IMR_TXEIM_BIT) && dev_data->buf_pos < dev_data->buf_end) {
-		uint32_t start_level = tx_fifo_threshold;
+	/* Set the TX FIFO threshold and its transmit start level. */
+	if (packet->num_bytes) {
+		/* If there is some data to send/receive, set the threshold to
+		 * the value configured for the driver instance and the start
+		 * level to the maximum possible value (it will be updated later
+		 * in tx_fifo() or tx_dummy_bytes() when TX is to be finished).
+		 * This helps avoid a situation when the TX FIFO becomes empty
+		 * before the transfer is complete and the SSI core finishes the
+		 * transaction and deactivates the CE line. This could occur
+		 * right before the data phase in enhanced SPI modes, when the
+		 * clock stretching feature does not work yet, or in Standard
+		 * SPI mode, where the clock stretching is not available at all.
+		 */
+		write_txftlr(dev, FIELD_PREP(TXFTLR_TXFTHR_MASK,
+					     dev_config->tx_fifo_depth_minus_1) |
+				  FIELD_PREP(TXFTLR_TFT_MASK,
+					     dev_config->tx_fifo_threshold));
+	} else {
+		uint32_t total_tx_entries = 0;
 
-		if (dev_data->dummy_bytes) {
-			uint32_t tx_total = dev_data->bytes_to_discard
-					  + dev_data->dummy_bytes;
-
-			if (start_level > tx_total - 1) {
-				start_level = tx_total - 1;
+		/* It the whole transfer is to contain only the command and/or
+		 * address, set up the transfer to start right after entries
+		 * for those appear in the TX FIFO, and the threshold to 0,
+		 * so that the interrupt occurs when the TX FIFO gets emptied.
+		 */
+		if (dev_data->xfer.cmd_length) {
+			if (dev_data->standard_spi) {
+				total_tx_entries += dev_data->xfer.cmd_length;
+			} else {
+				total_tx_entries += 1;
 			}
 		}
 
-		write_txftlr(dev,
-			FIELD_PREP(TXFTLR_TXFTHR_MASK, start_level) |
-			FIELD_PREP(TXFTLR_TFT_MASK, tx_fifo_threshold));
-	} else {
-		write_txftlr(dev, 0);
+		if (dev_data->xfer.addr_length) {
+			if (dev_data->standard_spi) {
+				total_tx_entries += dev_data->xfer.addr_length;
+			} else {
+				total_tx_entries += 1;
+			}
+		}
+
+		write_txftlr(dev, FIELD_PREP(TXFTLR_TXFTHR_MASK,
+					     total_tx_entries - 1));
 	}
 
 	/* Ensure that there will be no interrupt from the controller yet. */
@@ -928,6 +991,10 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 	/* Enable the controller. This must be done before DR is written. */
 	write_ssienr(dev, SSIENR_SSIC_EN_BIT);
 
+	/* Since the FIFO depth in SSI is always at least 8, it can be safely
+	 * assumed that the command and address fields (max. 2 and 4 bytes,
+	 * respectively) can be written here before the TX FIFO gets filled up.
+	 */
 	if (dev_data->standard_spi) {
 		if (dev_data->xfer.cmd_length) {
 			tx_control_field(dev, packet->cmd,
@@ -948,22 +1015,24 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 		}
 	}
 
-	if (dev_data->dummy_bytes) {
-		if (make_rx_cycles(dev)) {
-			imr = IMR_RXFIM_BIT;
-		}
+	/* Prefill TX FIFO with any data we can */
+	if (dev_data->dummy_bytes && tx_dummy_bytes(dev)) {
+		imr = IMR_RXFIM_BIT;
 	} else if (packet->dir == MSPI_TX && packet->num_bytes) {
 		tx_data(dev, packet);
 	}
 
 	/* Enable interrupts now and wait until the packet is done. */
 	write_imr(dev, imr);
-
-	/* Set SER to start transfer */
+	/* Write SER to start transfer */
 	write_ser(dev, BIT(dev_data->dev_id->dev_idx));
 
 	rc = k_sem_take(&dev_data->finished, timeout);
-	if (rc < 0) {
+	if (read_risr(dev) & RISR_RXOIR_BIT) {
+		LOG_ERR("RX FIFO overflow occurred");
+		rc = -EIO;
+	} else if (rc < 0) {
+		LOG_ERR("Transfer timed out");
 		rc = -ETIMEDOUT;
 	}
 
@@ -986,7 +1055,6 @@ static int start_next_packet(const struct device *dev, k_timeout_t timeout)
 	} else {
 		write_ssienr(dev, 0);
 	}
-
 	/* Clear SER */
 	write_ser(dev, 0);
 
@@ -1010,8 +1078,7 @@ static int _api_transceive(const struct device *dev,
 	struct mspi_dw_data *dev_data = dev->data;
 	int rc;
 
-	dev_data->spi_ctrlr0 &= ~SPI_CTRLR0_WAIT_CYCLES_MASK
-			     &  ~SPI_CTRLR0_INST_L_MASK
+	dev_data->spi_ctrlr0 &= ~SPI_CTRLR0_INST_L_MASK
 			     &  ~SPI_CTRLR0_ADDR_L_MASK;
 
 	if (!apply_cmd_length(dev_data, req->cmd_length) ||
@@ -1019,10 +1086,15 @@ static int _api_transceive(const struct device *dev,
 		return -EINVAL;
 	}
 
-	if (dev_data->standard_spi &&
-	    (req->rx_dummy != 0 || req->tx_dummy != 0)) {
-		LOG_ERR("Dummy cycles unsupported in single line mode");
-		return -EINVAL;
+	if (dev_data->standard_spi) {
+		if (req->tx_dummy) {
+			LOG_ERR("TX dummy cycles unsupported in single line mode");
+			return -EINVAL;
+		}
+		if (req->rx_dummy % 8) {
+			LOG_ERR("Unsupported RX (%u) dummy cycles", req->rx_dummy);
+			return -EINVAL;
+		}
 	} else if (req->rx_dummy > SPI_CTRLR0_WAIT_CYCLES_MAX ||
 		   req->tx_dummy > SPI_CTRLR0_WAIT_CYCLES_MAX) {
 		LOG_ERR("Unsupported RX (%u) or TX (%u) dummy cycles",
@@ -1131,8 +1203,8 @@ static int _api_xip_config(const struct device *dev,
 			return -EINVAL;
 		}
 
-		if (params->rx_dummy > SPI_CTRLR0_WAIT_CYCLES_MAX ||
-		    params->tx_dummy > SPI_CTRLR0_WAIT_CYCLES_MAX) {
+		if (params->rx_dummy > XIP_CTRL_WAIT_CYCLES_MAX ||
+		    params->tx_dummy > XIP_WRITE_CTRL_WAIT_CYCLES_MAX) {
 			LOG_ERR("Unsupported RX (%u) or TX (%u) dummy cycles",
 				params->rx_dummy, params->tx_dummy);
 			return -EINVAL;
@@ -1198,29 +1270,11 @@ static int api_timing_config(const struct device *dev,
 			     const uint32_t param_mask, void *cfg)
 {
 	struct mspi_dw_data *dev_data = dev->data;
-	int rc, rc2;
+	struct mspi_dw_timing_cfg *config = cfg;
 
 	if (param_mask & MSPI_DW_RX_TIMING_CFG) {
-		rc = pm_device_runtime_get(dev);
-		if (rc < 0) {
-			LOG_ERR("pm_device_runtime_get() failed: %d", rc);
-			return rc;
-		}
-
-		(void)k_sem_take(&dev_data->ctx_lock, K_FOREVER);
-		/* Disable controller before configuring */
-		write_ssienr(dev, 0);
-		write_rx_sample_dly(dev, (uint32_t)(uintptr_t)cfg);
-
-		k_sem_give(&dev_data->ctx_lock);
-
-		rc2 = pm_device_runtime_put(dev);
-		if (rc2 < 0) {
-			LOG_ERR("pm_device_runtime_put() failed: %d", rc2);
-			rc = (rc < 0 ? rc : rc2);
-		}
-
-		return rc;
+		dev_data->rx_sample_dly = config->rx_sample_dly;
+		return 0;
 	}
 	return -ENOTSUP;
 }
@@ -1351,6 +1405,9 @@ static int dev_init(const struct device *dev)
 			return rc;
 		}
 	}
+
+	/* Make sure controller is disabled. */
+	write_ssienr(dev, 0);
 
 #if defined(CONFIG_PINCTRL)
 	if (IS_ENABLED(CONFIG_PM_DEVICE_RUNTIME)) {

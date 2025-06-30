@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2024 Nordic Semiconductor ASA
+ * Copyright (c) 2025 Tenstorrent AI ULC
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -33,6 +34,17 @@ static inline void vendor_specific_resume(const struct device *dev)
 	ARG_UNUSED(dev);
 
 	NRF_EXMIF->TASKS_START = 1;
+
+	/* Try to write an SSI register and wait until the write is successful
+	 * to ensure that the clock that drives the SSI core is ready.
+	 */
+	uint32_t rxftlr = read_rxftlr(dev);
+	uint32_t rxftlr_mod = rxftlr ^ 1;
+
+	do {
+		write_rxftlr(dev, rxftlr_mod);
+		rxftlr = read_rxftlr(dev);
+	} while (rxftlr != rxftlr_mod);
 }
 
 static inline void vendor_specific_irq_clear(const struct device *dev)
