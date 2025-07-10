@@ -1,0 +1,35 @@
+# Tracing configuration options
+
+# Copyright (c) 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+choice TRACING_BACKEND_CHOICE
+
+config TRACING_BACKEND_RINGBUF
+	bool "Ring Buffer tracing backend"
+	help
+	  Enable tracing using the Ring Buffer backend. This backend places
+	  data into a ring buffer in RAM, which can be read by an external
+	  host system. The host system is reponsible for updating the ring
+	  buffer head pointer to indicate how much data has been read.
+
+endchoice
+
+config TRACING_BACKEND_NAME
+	string
+	default "tracing_backend_ringbuf" if TRACING_BACKEND_RINGBUF
+
+config RINGBUF_TRACING_BUFFER_SIZE
+	int "Size of the tracing buffer in bytes"
+	depends on TRACING_BACKEND_RINGBUF
+	default 4096
+	help
+	  Size of the ring buffer used for tracing. Data will be discarded
+	  if space does not exist in the buffer when new data arrives.
+
+config TRACING_BACKEND_TT
+	bool "Tenstorrent tracing backend"
+	depends on TRACING_BACKEND_RINGBUF
+	help
+	  Enable the Tenstorrent tracing backend, which will expose the
+	  tracing buffer to the host system via a specific scratch register.
