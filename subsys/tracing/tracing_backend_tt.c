@@ -12,7 +12,11 @@ extern volatile struct ring_tracing_buf ring;
 
 static int tracing_backend_tt_init(void)
 {
-	sys_write32((uint32_t)(uintptr_t)&ring, CMFW_TRACE_BUF_REG_ADDR);
+	uint32_t trace_addr = (uint32_t)(uintptr_t)&ring;
+
+	trace_addr &= GENMASK(23, 0); /* Mask to 24 bits */
+	sys_write32((0xCA << 24) | trace_addr,
+		CMFW_TRACE_BUF_REG_ADDR);
 	return 0;
 }
 
