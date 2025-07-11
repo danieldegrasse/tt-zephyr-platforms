@@ -8,15 +8,21 @@
 /* Defines the scratch register to write ringbuf address to */
 #include <status_reg.h>
 
-extern volatile struct ring_tracing_buf ring;
+#define TRACE_MAGIC 0x54524143 /* "TRAC" in ASCII */
+
+extern struct ring_tracing_buf ring;
+
+struct tt_tracing_data {
+	uint32_t magic;
+	struct ring_tracing_buf *ring;
+} trace_data;
 
 static int tracing_backend_tt_init(void)
 {
-	uint32_t trace_addr = (uint32_t)(uintptr_t)&ring;
+	trace_data.magic = TRACE_MAGIC;
+	trace_data.ring = &ring;
 
-	trace_addr &= GENMASK(23, 0); /* Mask to 24 bits */
-	sys_write32((0xCA << 24) | trace_addr,
-		CMFW_TRACE_BUF_REG_ADDR);
+	sys_write32(((uint32_t) &trace_data), CMFW_TRACE_BUF_REG_ADDR);
 	return 0;
 }
 

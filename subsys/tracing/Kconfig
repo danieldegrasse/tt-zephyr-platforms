@@ -22,7 +22,7 @@ config TRACING_BACKEND_NAME
 config RINGBUF_TRACING_BUFFER_SIZE
 	int "Size of the tracing buffer in bytes"
 	depends on TRACING_BACKEND_RINGBUF
-	default 4096
+	default 8192
 	help
 	  Size of the ring buffer used for tracing. Data will be discarded
 	  if space does not exist in the buffer when new data arrives.

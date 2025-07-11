@@ -12,21 +12,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
-#include <inttypes.h>
 #include <libgen.h>
+#include <inttypes.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/select.h>
-#include <termios.h>
-#include <sys/time.h>
-#include <unistd.h>
+#include <stddef.h>
 
 #include "arc_tlb.h"
 
@@ -41,9 +35,13 @@ typedef uint16_t ring_buf_idx_t;
 #define RING_BUFFER_MAX_SIZE (UINT16_MAX / 2)
 #endif
 
-struct ring_buf_index { ring_buf_idx_t head, tail, base; };
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
-/** @endcond */
+struct ring_buf_index {
+	ring_buf_idx_t head;
+	ring_buf_idx_t tail;
+	ring_buf_idx_t base;
+};
 
 /**
  * @brief A structure to represent a ring buffer
@@ -55,8 +53,22 @@ struct ring_buf {
 	uint32_t size;
 };
 
+struct ring_tracing_buf {
+	struct ring_buf rb;
+	volatile uint8_t buffer_full;
+};
+
+struct tt_tracing_data {
+	uint32_t magic;
+	uint32_t ring_buf_addr; /* Address of the ring tracing buffer */
+};
+
 #ifndef TRACE_DISCOVERY_ADDR
 #define TRACE_DISCOVERY_ADDR 0x80030458
+#endif
+
+#ifndef TRACE_MAGIC
+#define TRACE_MAGIC 0x54524143 /* "TRAC" in ASCII */
 #endif
 
 #define STATUS_POST_CODE_REG_ADDR 0x80030060
@@ -114,8 +126,6 @@ static int check_post_code(struct mem_access_driver *driver)
 		return -EIO;
 	}
 	if (val.prefix != POST_CODE_PREFIX) {
-		E("prefix 0x%04x does not match expected prefix 0x%04x", val.prefix,
-		  POST_CODE_PREFIX);
 		return -EINVAL;
 	}
 
@@ -124,8 +134,81 @@ static int check_post_code(struct mem_access_driver *driver)
 	return 0;
 }
 
+static int check_tracing_magic(struct tt_tracing_data *trace_data)
+{
+	if (trace_data->magic != TRACE_MAGIC) {
+		E("magic 0x%08x does not match expected magic 0x%08x", trace_data->magic,
+		  TRACE_MAGIC);
+		return -EINVAL;
+	}
+	D(2, "Tracing magic: 0x%08x", trace_data->magic);
+
+	return 0;
+}
+
+static int ring_buf_get(struct mem_access_driver *driver, uint32_t ring_buf_addr,
+			uint8_t *data, uint32_t size)
+{
+	int ret;
+	struct ring_buf ring_buf;
+	struct ring_buf_index get;
+	ring_buf_idx_t head_offset, available, wrap_size, tail_offset;
+
+	ret = driver->read(ring_buf_addr, (uint8_t *)&ring_buf, sizeof(ring_buf));
+	if (ret < 0) {
+		E("failed to read ring buffer descriptor");
+		return ret;
+	}
+	/* Check how many bytes are available in the ring buffer */
+	available = ring_buf.put.head - ring_buf.get.tail;
+	if (available == 0) {
+		D(2, "Ring buffer is empty");
+		return 0;
+	}
+	size = MIN(size, available);
+	/*
+	 * Copy ring buffer get index. This way we won't modify the put index,
+	 * which the device could be updating
+	 */
+	memcpy(&get, &ring_buf.get, sizeof(get));
+	/* Calculate the head offset, and pull data from the buffer */
+	head_offset = get.head - get.base;
+	if (head_offset > ring_buf.size) {
+		/* Ring base hasn't been updated yet */
+		head_offset -= ring_buf.size;
+	}
+	wrap_size = ring_buf.size - head_offset;
+	size = MIN(size, wrap_size);
+	D(2, "Reading %u bytes from ring buffer at offset %u", size, head_offset);
+	/* Read data from the ring buffer */
+	ret = driver->read(ring_buf.buffer_addr + head_offset, data, size);
+	if (ret < 0) {
+		E("failed to read ring buffer data");
+		return ret;
+	}
+	/* Update the ring buffer get index */
+	get.tail += size;
+	get.head = get.tail;
+	tail_offset = get.tail - get.base;
+	if (tail_offset >= ring_buf.size) {
+		/* We wrapped: adjust ring base */
+		get.base += ring_buf.size;
+	}
+	D(1, "Updated ring buffer get index: head=%u, tail=%u, base=%u",
+	   get.head, get.tail, get.base);
+	/* Write the updated ring buffer get index */
+	ret = driver->write(ring_buf_addr + offsetof(struct ring_buf, get),
+			    (uint8_t *)&get, sizeof(get));
+	if (ret < 0) {
+		E("failed to write ring buffer descriptor");
+		return ret;
+	}
+	return size;
+}
+
 static uint8_t read_buf[4096];
 static bool running;
+static char *output_file;
 
 static void handler(int sig)
 {
@@ -136,9 +219,11 @@ static void handler(int sig)
 static int loop(struct mem_access_driver *driver)
 {
 	int ret;
-	uint32_t ring_buf_addr;
-	struct ring_buf ring_buf;
-	uint32_t read_len;
+	uint32_t trace_data_addr, ring_buf_addr;
+	struct ring_tracing_buf ring_buf;
+	struct tt_tracing_data trace_data;
+	uint32_t read_count = 0;
+	int size;
 	FILE *fp;
 
 	running = true;
@@ -148,68 +233,82 @@ static int loop(struct mem_access_driver *driver)
 		return EXIT_FAILURE;
 	}
 
-	fp = fopen("trace_data", "wb");
+	fp = fopen(output_file, "wb");
 	if (!fp) {
-		E("failed to open trace_data");
+		E("failed to open %s", output_file);
 		return -EIO;
 	}
 
 	ret = check_post_code(driver);
 	if (ret < 0) {
+		I("Waiting for post code to be set by the firmware");
+	}
+	while (running && (ret < 0)) {
+		ret = check_post_code(driver);
+	}
+
+	ret = driver->read(TRACE_DISCOVERY_ADDR, (uint8_t *)&trace_data_addr,
+			sizeof(trace_data_addr));
+	if (ret < 0) {
+		E("failed to read tracing discovery address");
+		ret = -EIO;
+		goto out;
+	}
+	if (trace_data_addr == 0) {
+		E("tracing discovery address is 0, tracing is not enabled");
+		ret = -ENODEV;
+		goto out;
+	}
+	ret = driver->read(trace_data_addr, (uint8_t *)&trace_data, sizeof(trace_data));
+	if (ret < 0) {
+		E("failed to read tracing data");
 		goto out;
 	}
 
-	if (driver->read(TRACE_DISCOVERY_ADDR, (uint8_t *)&ring_buf_addr,
-			 sizeof(ring_buf_addr)) < 0) {
-		E("failed to read ring buffer address");
-		return -EIO;
+	ret = check_tracing_magic(&trace_data);
+	if (ret < 0) {
+		goto out;
 	}
-	if (ring_buf_addr >> 24 != 0xCA) {
-		E("invalid ring buffer address 0x%08x", ring_buf_addr);
-		return -EINVAL;
-	}
-	/* Mask out the prefix, convert to address in CSM */
-	ring_buf_addr = (ring_buf_addr & 0xFFFFFF) + 0x10000000;
-	I("ring buffer address: 0x%08x", ring_buf_addr);
-	while (running) {
-		if (driver->read(ring_buf_addr, (uint8_t *)&ring_buf, sizeof(ring_buf)) < 0) {
-			E("failed to read ring buffer descriptor");
-			return -EIO;
-		}
 
-		if (ring_buf.get.base <= ring_buf.put.base) {
-			/* Read up to put base */
-			read_len = ring_buf.put.base - ring_buf.get.base;
-		} else {
-			/* Read to end of buffer */
-			read_len = ring_buf.size - ring_buf.get.base;
-		}
-		I("ring buffer get base: %u, put base: %u, read_len: %u",
-		  ring_buf.get.base, ring_buf.put.base, read_len);
-		if (read_len > sizeof(read_buf)) {
-			E("read_len %u is larger than read buffer size %zu", read_len,
-			  sizeof(read_buf));
-			return -EINVAL;
-		}
-		if (driver->read(ring_buf.buffer_addr + ring_buf.get.base, read_buf, read_len) < 0) {
-			E("failed to read ring buffer data");
-			return -EIO;
-		}
-		ring_buf.get.base += read_len;
-		ring_buf.get.tail += read_len;
-		ring_buf.get.head += read_len;
-		/* Update ring buffer */
-		if (driver->write(ring_buf_addr, (uint8_t *)&ring_buf, sizeof(ring_buf)) < 0) {
+	ring_buf_addr = trace_data.ring_buf_addr + offsetof(struct ring_tracing_buf, rb);
+	ret = driver->read(ring_buf_addr, (uint8_t *)&ring_buf, sizeof(ring_buf));
+	if (ret < 0) {
+		E("failed to read ring buffer descriptor");
+		goto out;
+	}
+	if (ring_buf.buffer_full) {
+		I("Ring buffer is full, resetting it");
+		ring_buf.rb.put.head = ring_buf.rb.put.tail = ring_buf.rb.put.base = 0;
+		ring_buf.rb.get.head = ring_buf.rb.get.tail = ring_buf.rb.get.base = 0;
+		ring_buf.buffer_full = 0;
+		ret = driver->write(ring_buf_addr, (uint8_t *)&ring_buf, sizeof(ring_buf));
+		if (ret < 0) {
 			E("failed to write ring buffer descriptor");
-			return -EIO;
+			goto out;
 		}
-		if (read_len > 0) {
-			I("read %u bytes from ring buffer", read_len);
+	}
+
+	while (running) {
+		size = ring_buf_get(driver, ring_buf_addr, read_buf, sizeof(read_buf));
+		if (size < 0) {
+			E("Failed to read ring buffer");
+			ret = size;
+			goto out;
 		}
-		fwrite(read_buf, 1, read_len, fp);
+		read_count += size;
+		/* Print a new count so the user knows we are making progress */
+		printf("\rRead %u bytes", read_count);
+		ret = fwrite(read_buf, 1, size, fp);
+		if (ret != size) {
+			E("Failed to write %u bytes to %s: %s", size, output_file,
+			  strerror(errno));
+			ret = -EIO;
+			goto out;
+		}
 	}
 
 out:
+	I("\r\nRead %u bytes from tracing ring buffer", read_count);
 	fclose(fp);
 	driver->stop();
 	return ret;
@@ -221,7 +320,7 @@ static void usage(const char *progname)
 	  "Copyright (c) 2025 Tenstorrent AI ULC\n"
 	  "\n"
 	  "\n"
-	  "%s: %s [args..]\n"
+	  "%s: %s <output_file> [args..]\n"
 	  "\n"
 	  "args:\n"
 	  "-d <path>          : path to device node (default: %s)\n"
@@ -277,6 +376,13 @@ static int parse_args(int argc, char **argv)
 	}
 
 	/* perform extra checking here and error as needed */
+	if (optind >= argc) {
+        	E("Missing argument for filename");
+		usage(basename(argv[0]));
+		return -EINVAL;
+    	}
+
+	output_file = argv[optind];
 
 	return 0;
 }
