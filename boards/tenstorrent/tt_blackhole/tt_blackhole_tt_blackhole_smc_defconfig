@@ -23,3 +23,8 @@ CONFIG_FLASH=y
 
 # enable external spi flash
 CONFIG_FLASH_MSPI_NOR_RUNTIME_PROBE=y
+# SPI designware controller on the SMC has a very small FIFO, which
+# will routinely underflow if we try to perform large transfers. Limit
+# the maximum program size to 15 bytes, so we never attempt a transfer with
+# more than 15 bytes in the FIFO.
+CONFIG_FLASH_MSPI_NOR_MAX_WRITE_SIZE=11
