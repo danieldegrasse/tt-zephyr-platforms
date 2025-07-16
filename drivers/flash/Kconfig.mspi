@@ -31,6 +31,16 @@ config FLASH_MSPI_NOR_RUNTIME_PROBE
 	  If enabled, the driver will probe the flash device's JEDEC ID at
 	  runtime, and used that to determine the command set and flash size.
 
+config FLASH_MSPI_NOR_MAX_WRITE_SIZE
+	int "Maximum write size for FLASH driver"
+	default 65535
+	help
+	  This option sets the maximum program size the flash driver will use.
+	  For some buggy MSPI controllers, this may need to be lowered to
+	  ensure that writes do not fail. By default, up to UINT16_MAX
+	  bytes can be programmed at once- note that the driver will
+	  not program across page boundaries regardless of this setting.
+
 endif # FLASH_MSPI_NOR
 
 endmenu
