@@ -133,7 +133,7 @@ void process_cm2dm_message(struct bh_chip *chip)
 				uint8_t fan_speed_percentage = (uint8_t)message.data & 0xFF;
 				uint8_t fan_speed = (uint8_t)DIV_ROUND_UP(
 					fan_speed_percentage * UINT8_MAX, 100);
-				pwm_set_cycles(max6639_pwm_dev, 0, UINT8_MAX, fan_speed, 0);
+				pwm_set_cycles(max6639_pwm_dev, 0, UINT8_MAX, UINT8_MAX, 0);
 				int chip_index = is_p300_left_chip() ? 1 : 0;
 				auto_fan_speed[chip_index] = fan_speed;
 			}
@@ -310,7 +310,7 @@ int main(void)
 		uint8_t fan_speed =
 			(uint8_t)DIV_ROUND_UP(35 * UINT8_MAX, 100); /* Start fan speed at 35% */
 
-		pwm_set_cycles(max6639_pwm_dev, 0, UINT8_MAX, fan_speed, 0);
+		pwm_set_cycles(max6639_pwm_dev, 0, UINT8_MAX, UINT8_MAX, 0);
 	}
 
 	if (IS_ENABLED(CONFIG_TT_FWUPDATE)) {
@@ -541,7 +541,7 @@ int main(void)
 			pwm_set_cycles(max6639_pwm_dev, 0, UINT8_MAX, forced_fan_speed, 0);
 		} else {
 			uint8_t max_fan_speed = MAX(auto_fan_speed[0], auto_fan_speed[1]);
-			pwm_set_cycles(max6639_pwm_dev, 0, UINT8_MAX, max_fan_speed, 0);
+			pwm_set_cycles(max6639_pwm_dev, 0, UINT8_MAX, UINT8_MAX, 0);
 		}
 
 		/*
