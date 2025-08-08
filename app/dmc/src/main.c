@@ -49,7 +49,7 @@ static const struct device *const max6639_sensor_dev =
 	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(max6639_sensor));
 
 #if BH_CHIP_COUNT == 2
-static uint8_t auto_fan_speed[BH_CHIP_COUNT] = {35, 35}; /* per–chip */
+static uint8_t auto_fan_speed[BH_CHIP_COUNT] = {100, 100}; /* per–chip */
 #else
 static uint8_t auto_fan_speed[BH_CHIP_COUNT] = {35}; /* per–chip */
 #endif
