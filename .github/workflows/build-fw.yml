@@ -49,6 +49,17 @@ jobs:
       matrix:
         board: ${{ fromJson(needs.genboards.outputs.boards) }}
     steps:
+      - name: Check signing key
+        shell: bash
+        run: |
+          SIGNATURE_KEY_FILE="$(mktemp)"
+          echo "${{ secrets.SIGNATURE_KEY }}" | base64 -d > "$SIGNATURE_KEY_FILE"
+          SZ=$(wc -c "$SIGNATURE_KEY_FILE" | awk '{print $1}')
+          echo "Signing key size is $SZ bytes"
+          if [ $SZ -gt 42 ]; then
+            echo "SIGNATURE_KEY_FILE=$SIGNATURE_KEY_FILE" >> "$GITHUB_ENV"
+          fi
+
       - uses: actions/checkout@v4
         with:
           path: tt-zephyr-platforms
@@ -62,16 +73,6 @@ jobs:
         run: |
           BOARD="$(./scripts/rev2board.sh "${{ matrix.board }}")"
           echo "BOARD=$BOARD" | tee "$GITHUB_ENV"
-
-      - name: Check signing key
-        shell: bash
-        run: |
-          SIGNATURE_KEY_FILE="$(mktemp)"
-          echo "${{ secrets.SIGNATURE_KEY }}" | base64 -d > "$SIGNATURE_KEY_FILE"
-          SZ=$(wc -c "$SIGNATURE_KEY_FILE" | awk '{print $1}')
-          if [ $SZ -gt 42 ]; then
-            echo "SIGNATURE_KEY_FILE=$SIGNATURE_KEY_FILE" >> "$GITHUB_ENV"
-          fi
 
       - name: Build firmware bundle
         shell: bash
