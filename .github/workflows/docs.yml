@@ -236,7 +236,6 @@ jobs:
   deploy:
     runs-on: ubuntu-22.04
     needs: build
-    if: github.event_name != 'pull_request'
     permissions:
       pages: write
       id-token: write
