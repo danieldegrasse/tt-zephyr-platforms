@@ -71,7 +71,12 @@ if (SB_CONFIG_BL2)
   # build, we need to create a tiny Zephyr module in the source directory, and
   # tell sysbuild to include that module with mcuboot
   set(mcuboot_EXTRA_ZEPHYR_MODULES "${CMAKE_CURRENT_LIST_DIR}/mcuboot_module" CACHE INTERNAL "mcuboot_module directory")
-  set_config_string(mcuboot CONFIG_BOOT_SIGNATURE_KEY_FILE "${SB_CONFIG_BL2_SIGNATURE_KEY_FILE}")
+  if (SB_CONFIG_BOOT_SIGNATURE_KEY_FILE STREQUAL "")
+    message(WARNING "No BL2 signature key file set, using default test keys")
+  else()
+    set_config_string(mcuboot CONFIG_BOOT_SIGNATURE_KEY_FILE "${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}")
+    set_config_string(recovery CONFIG_MCUBOOT_SIGNATURE_KEY_FILE "${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}")
+  endif()
 endif()
 
 # ======== Defines for filesystem generation ========
@@ -126,11 +131,11 @@ if (SB_CONFIG_BL2 AND NOT "${BOARD_REVISION}" STREQUAL "galaxy")
     BOARD       ${SB_CONFIG_DMC_BOARD}
     BUILD_ONLY 1
   )
-  if (SB_CONFIG_BL2_SIGNATURE_KEY_FILE STREQUAL "")
+  if (SB_CONFIG_BOOT_SIGNATURE_KEY_FILE STREQUAL "")
     message(WARNING "No BL2 signature key file set, using default test keys")
   else()
-    set_config_string(mcuboot-bl2 CONFIG_BOOT_SIGNATURE_KEY_FILE "${SB_CONFIG_BL2_SIGNATURE_KEY_FILE}")
-    set_config_string(dmc CONFIG_MCUBOOT_SIGNATURE_KEY_FILE "${SB_CONFIG_BL2_SIGNATURE_KEY_FILE}")
+    set_config_string(mcuboot-bl2 CONFIG_BOOT_SIGNATURE_KEY_FILE "${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}")
+    set_config_string(dmc CONFIG_MCUBOOT_SIGNATURE_KEY_FILE "${SB_CONFIG_BOOT_SIGNATURE_KEY_FILE}")
   endif()
   # Generate mcuboot trailer for DMC image
   set (TRAILER_OUTPUT ${CMAKE_BINARY_DIR}/mcuboot_magic_test.bin)
