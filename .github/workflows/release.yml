@@ -63,6 +63,29 @@ jobs:
           name: ${{ steps.set_vars.outputs.RELEASE_NOTES }}
           path: ${{ env.RELEASE_NOTES_DIR }}/${{ steps.set_vars.outputs.RELEASE_NOTES }}
 
+  build-recovery-bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tt-zephyr-platforms
+      - uses: ./tt-zephyr-platforms/.github/workflows/prepare-zephyr
+        with:
+          app-path: tt-zephyr-platforms
+      - shell: bash
+        run: |
+          SIGNATURE_KEY_FILE="$(mktemp)"
+          echo "${{ secrets.SIGNATURE_KEY }}" | base64 -d > "$SIGNATURE_KEY_FILE"
+          SZ=$(wc -c "$SIGNATURE_KEY_FILE" | awk '{print $1}')
+          if [ $SZ -gt 42 ]; then
+            echo "SIGNATURE_KEY_FILE=$SIGNATURE_KEY_FILE" >> "$GITHUB_ENV"
+          fi
+      - name: Build Recovery Bundle
+        shell: bash
+        run: |
+          python3 tt-zephyr-platforms/scripts/tooling/blackhole_recovery/prepare-recovery-bundle.py \
+            fw-pack-${{ github.ref }}-recovery.tar.gz
+
   build-release:
     needs: [prepare-release]
     uses: ./.github/workflows/build-fw.yml
@@ -70,7 +93,7 @@ jobs:
       SIGNATURE_KEY: ${{ secrets.SIGNATURE_KEY }}
 
   publish-release:
-    needs: [build-release, prepare-release]
+    needs: [build-release, prepare-release, build-recovery-bundle]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -120,6 +143,7 @@ jobs:
           prerelease: true
           fail_on_unmatched_files: true
           files: |
+            fw-pack-${{ github.ref }}-recovery.tar.gz
             *.fwbundle
             tt-zephyr-platforms-${{ steps.set_vars.outputs.VERSION }}.zip
             tt-zephyr-platforms-${{ steps.set_vars.outputs.VERSION }}.spdx
