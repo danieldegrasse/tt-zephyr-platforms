@@ -2,7 +2,7 @@ build-job:
   stage: build
   script:
     - echo "Building the project..."
-    - echo "Completed dry CI run."
+    - echo "Completed dry CI run"
   tags:
     - 8-core
 
