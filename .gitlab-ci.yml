@@ -3,6 +3,7 @@ build-job:
   script:
     - echo "Building the project..."
     - echo "Completed dry CI run"
+    - echo "Another command"
   tags:
     - 8-core
 
