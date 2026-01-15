@@ -9,7 +9,7 @@
 
 #include "smc_cpu_reg.h"
 
-static void uart_init(uint32_t base_addr)
+static void uart_x_init(uint32_t base_addr)
 {
 	UART_CTRL_reg_u uart_ctrl;
 
@@ -17,6 +17,28 @@ static void uart_init(uint32_t base_addr)
 	uart_ctrl.f.uart_en = 1;
 	uart_ctrl.f.uart_reset_n_n0_scan = 1;
 	sys_write32(uart_ctrl.val, base_addr);
+}
+
+static void uart_init(void)
+{
+	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))) {
+		/* Enable UART0 */
+		uart_x_init(UART_WRAP0_UART_CTRL_REG_ADDR);
+	}
+	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart1))) {
+		/* Enable UART1 */
+		uart_x_init(UART_WRAP1_UART_CTRL_REG_ADDR);
+	}
+
+	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart2))) {
+		/* Enable UART2 */
+		uart_x_init(UART_WRAP2_UART_CTRL_REG_ADDR);
+	}
+
+	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart3))) {
+		/* Enable UART3 */
+		uart_x_init(UART_WRAP3_UART_CTRL_REG_ADDR);
+	}
 }
 
 /**
@@ -33,22 +55,5 @@ void soc_early_init_hook(void)
 
 	sys_write32(reset_reg.val, RESET_UNIT_PERIPHERAL_RESETS_REG_ADDR);
 
-	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))) {
-		/* Enable UART0 */
-		uart_init(UART_WRAP0_UART_CTRL_REG_ADDR);
-	}
-	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart1))) {
-		/* Enable UART1 */
-		uart_init(UART_WRAP1_UART_CTRL_REG_ADDR);
-	}
-
-	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart2))) {
-		/* Enable UART2 */
-		uart_init(UART_WRAP2_UART_CTRL_REG_ADDR);
-	}
-
-	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart3))) {
-		/* Enable UART3 */
-		uart_init(UART_WRAP3_UART_CTRL_REG_ADDR);
-	}
+	uart_init();
 }
