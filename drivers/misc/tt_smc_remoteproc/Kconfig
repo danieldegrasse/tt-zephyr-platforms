@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config TT_SMC_REMOTEPROC
-
 	bool "Tenstorrent SMC Remote Processor Driver"
 	default y
 	select I3C
+	select CRC
 	depends on DT_HAS_TENSTORRENT_SMC_REMOTEPROC_ENABLED
 	help
 	  Enable the Remote Processor driver for the Tenstorrent SMC platform.
@@ -19,4 +19,3 @@ config TT_SMC_REMOTEPROC_INIT_PRIO
 	  Set the initialization priority of the Tenstorrent SMC Remote Processor driver.
 
 endif # TT_SMC_REMOTEPROC
-
