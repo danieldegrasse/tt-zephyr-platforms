@@ -12,7 +12,6 @@
 #include <zephyr/drivers/misc/tt_smc_remoteproc.h>
 
 #include <soc.h>
-#include <zephyr/drivers/flash.h>
 
 const struct device *smc_dev = DEVICE_DT_GET(DT_NODELABEL(remoteproc));
 

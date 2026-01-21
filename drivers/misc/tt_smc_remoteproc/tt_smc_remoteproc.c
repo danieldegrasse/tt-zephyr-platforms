@@ -55,7 +55,7 @@ struct occp_write_data_request {
 	uint32_t length: 11;
 	uint32_t attributes: 5;
 	uint32_t reserved: 16;
-};
+} __packed;
 
 struct occp_read_data_request {
 	struct occp_header header;
@@ -64,7 +64,25 @@ struct occp_read_data_request {
 	uint32_t length: 11;
 	uint32_t attributes: 5;
 	uint32_t reserved: 16;
+} __packed;
+
+struct occp_execute_image_request {
+	struct occp_header header;
+	uint32_t execution_address_low;
+	uint32_t execution_address_high;
+	uint32_t cpu_id: 8;
+	uint32_t reserved: 3;
+	uint32_t attributes: 5;
+} __packed;
+
+struct occp_execute_image_response {
+	struct occp_header header;
+} __packed;
+
+uint8_t remote_smc_bin[] = {
+	#include <remote_smc_bin.inc>
 };
+const unsigned int remote_smc_bin_len = sizeof(remote_smc_bin);
 
 BUILD_ASSERT(CONFIG_TT_SMC_REMOTEPROC_INIT_PRIO > CONFIG_I3C_CONTROLLER_INIT_PRIORITY,
 	     "TT_SMC_REMOTEPROC_INIT_PRIO must be higher than I3C_CONTROLLER_INIT_PRIORITY");
@@ -108,31 +126,24 @@ int tt_smc_remoteproc_boot(const struct device *dev, uint8_t *img_data, size_t i
 	       version_resp.minor_version,
 	       version_resp.patch_version);
 
-	/* This image just spins at 0xc0066000 */
-	unsigned char spin_bin[] = {
-		0x13, 0x05, 0x00, 0x00, 0x93, 0x05, 0x10, 0x00, 0x13, 0x06, 0x20, 0x00,
-		0x63, 0x00, 0x05, 0x00
-	};
-	unsigned int spin_bin_len = 16;
-
 	/* Issue a WRITE_DATA command */
 	write_req.header.cmd_header.app_id = OCCP_APP_BASE;
 	write_req.header.cmd_header.msg_id = OCCP_BASE_MSG_WRITE_DATA;
 	write_req.header.cmd_header.length = sizeof(write_req) - sizeof(write_req.header)
-					       + spin_bin_len;
+					       + remote_smc_bin_len;
 	write_req.header.header_crc = crc8((uint8_t *)&write_req.header + 1,
 				    sizeof(write_req.header) - 1, 0xD3, 0xFF, false);
 	write_req.address_low = 0xc0066000; /* Boot address for remote SMC */
-	write_req.length = spin_bin_len;
+	write_req.length = remote_smc_bin_len;
 
 	/*
 	 * TODO: we should not need to copy into a buffer like this, we
 	 * should be able to use the I3C transfer API. This isn't working in
 	 * simulation though...
 	 */
-	uint8_t msg_buf[sizeof(write_req) + spin_bin_len];
+	uint8_t msg_buf[sizeof(write_req) + remote_smc_bin_len];
 	memcpy(msg_buf, &write_req, sizeof(write_req));
-	memcpy(msg_buf + sizeof(write_req), spin_bin, spin_bin_len);
+	memcpy(msg_buf + sizeof(write_req), remote_smc_bin, remote_smc_bin_len);
 
 	ret = i3c_write(data->i3c_dev, msg_buf, sizeof(msg_buf));
 	/* Without this, the I3C read following this causes issues in the OCCP processing */
@@ -151,7 +162,7 @@ int tt_smc_remoteproc_boot(const struct device *dev, uint8_t *img_data, size_t i
 	read_req.header.header_crc = crc8((uint8_t *)&read_req.header + 1,
 				   sizeof(read_req.header) - 1, 0xD3, 0xFF, false);
 	read_req.address_low = 0xc0066000; /* Boot address for remote SMC */
-	read_req.length = spin_bin_len;
+	read_req.length = remote_smc_bin_len;
 
 	ret = i3c_write(data->i3c_dev, (uint8_t *)&read_req, sizeof(read_req));
 	if (ret != 0) {
@@ -162,7 +173,7 @@ int tt_smc_remoteproc_boot(const struct device *dev, uint8_t *img_data, size_t i
 	k_msleep(1000);
 
 	/* Now read the response */
-	uint8_t read_data[sizeof(struct occp_header) + spin_bin_len];
+	uint8_t read_data[sizeof(struct occp_header) + remote_smc_bin_len];
 	do {
 		ret = i3c_read(data->i3c_dev, read_data, sizeof(read_data));
 	} while (ret == -EIO);
@@ -173,10 +184,38 @@ int tt_smc_remoteproc_boot(const struct device *dev, uint8_t *img_data, size_t i
 	struct occp_header *read_resp_header = (struct occp_header *)read_data;
 	LOG_INF("OCCP READ_DATA response length: %d", read_resp_header->cmd_header.length);
 	if (memcmp(read_data + sizeof(struct occp_header),
-		   spin_bin, spin_bin_len) != 0) {
+		   remote_smc_bin, remote_smc_bin_len) != 0) {
 		LOG_ERR("OCCP READ_DATA response data does not match written data");
 		return -EIO;
 	}
+
+	/* Issue an EXECUTE_IMAGE command */
+	struct occp_execute_image_request exec_req = {0};
+	exec_req.header.cmd_header.app_id = OCCP_APP_BOOT;
+	exec_req.header.cmd_header.msg_id = OCCP_BOOT_MSG_EXECUTE_IMAGE;
+	exec_req.header.cmd_header.length = sizeof(exec_req) - sizeof(exec_req.header);
+	exec_req.header.header_crc = crc8((uint8_t *)&exec_req.header + 1,
+					sizeof(exec_req.header) - 1, 0xD3, 0xFF, false);
+	exec_req.execution_address_low = 0xc0066000; /* Boot address for remote SMC */
+	exec_req.cpu_id = 0; /* CPU 0 */
+
+	ret = i3c_write(data->i3c_dev, (uint8_t *)&exec_req, sizeof(exec_req));
+	if (ret != 0) {
+		LOG_ERR("Failed to send OCCP EXECUTE_IMAGE command: %d", ret);
+		return ret;
+	}
+	/* Without this, the I3C read following this causes issues in the OCCP processing */
+	k_msleep(1000);
+	/* Now read the response */
+	struct occp_execute_image_response exec_resp = {0};
+	do {
+		ret = i3c_read(data->i3c_dev, (uint8_t *)&exec_resp, sizeof(exec_resp));
+	} while (ret == -EIO);
+	if (ret != 0) {
+		LOG_ERR("Failed to read OCCP EXECUTE_IMAGE response: %d", ret);
+		return ret;
+	}
+	LOG_INF("OCCP EXECUTE_IMAGE response received");
 
 	return 0;
 }
