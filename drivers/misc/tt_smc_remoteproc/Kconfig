@@ -5,7 +5,7 @@ config TT_SMC_REMOTEPROC
 	bool "Tenstorrent SMC Remote Processor Driver"
 	default y
 	select I3C
-	select CRC
+	select GPIO
 	depends on DT_HAS_TENSTORRENT_SMC_REMOTEPROC_ENABLED
 	help
 	  Enable the Remote Processor driver for the Tenstorrent SMC platform.

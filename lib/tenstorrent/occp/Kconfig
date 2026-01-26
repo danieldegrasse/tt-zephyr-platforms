@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Tenstorrent AI ULC
+# SPDX-License-Identifier: Apache-2.0
+
+config OCCP
+	bool "OCCP Subsystem"
+	select CRC # Required for header checksum calculations
+	help
+	  Enable support for the OCCP (Open Chiplet Configuration Protocol)
+	  subsystem
+
+module = OCCP
+module-str = occp
+source "subsys/logging/Kconfig.template.log_config"

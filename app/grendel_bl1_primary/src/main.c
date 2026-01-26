@@ -15,6 +15,10 @@
 
 const struct device *smc_dev = DEVICE_DT_GET(DT_NODELABEL(remoteproc));
 
+uint8_t remote_smc_bin[] = {
+	#include <remote_smc_bin.inc>
+};
+const unsigned int remote_smc_bin_len = sizeof(remote_smc_bin);
 
 int main(void)
 {
@@ -27,7 +31,7 @@ int main(void)
 		return -ENODEV;
 	}
 
-	ret = tt_smc_remoteproc_boot(smc_dev, NULL, 0);
+	ret = tt_smc_remoteproc_boot(smc_dev, 0xc0066000, remote_smc_bin, remote_smc_bin_len);
 	if (ret != 0) {
 		printf("Failed to boot remote SMC: %d\n", ret);
 		return ret;
