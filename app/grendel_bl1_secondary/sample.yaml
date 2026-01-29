@@ -1,0 +1,5 @@
+sample:
+  name: bl1_secondary
+tests:
+  sample.bl1_secondary:
+    build_only: true

@@ -20,7 +20,7 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(occp, CONFIG_OCCP_LOG_LEVEL);
 
-uint8_t occp_rw_buffer[OCCP_MAX_RW_BUFFER_SIZE];
+uint8_t occp_rw_buffer[OCCP_MAX_MSG_SIZE];
 
 /**
  * @brief Get OCCP protocol version
@@ -73,49 +73,61 @@ int occp_write_data(const struct occp_backend *backend, uint64_t address, const 
 	struct occp_write_data_request write_req = {0};
 	struct occp_header resp;
 	int ret;
+	uint64_t write_addr = address;
+	size_t write_length;
+	/* Retry a transfer up to 10 times */
+	int retry_cnt = 10;
 
-	if (length > OCCP_MAX_RW_SIZE) {
-		LOG_ERR("OCCP write length %zu exceeds maximum %d", length, OCCP_MAX_RW_SIZE);
+	if (address & GENMASK(2, 0)) {
+		LOG_ERR("OCCP write address must be 4-byte aligned");
 		return -EINVAL;
 	}
 
-	/* Issue a WRITE_DATA command */
 	write_req.header.cmd_header.app_id = OCCP_APP_BASE;
 	write_req.header.cmd_header.app_id = OCCP_APP_BASE;
 	write_req.header.cmd_header.msg_id = OCCP_BASE_MSG_WRITE_DATA;
-	write_req.header.cmd_header.length = sizeof(write_req) - sizeof(write_req.header)
-					       + length;
-	write_req.header.header_crc = crc8((uint8_t *)&write_req.header + 1,
-				    sizeof(write_req.header) - 1, 0xD3, 0xFF, false);
-	write_req.address_low = address & GENMASK(31, 0);
-	write_req.address_high = (address >> 32);
-	write_req.length = length;
+	while (length > 0) {
+		write_length = MIN(length, OCCP_MAX_MSG_SIZE - sizeof(write_req));
+		write_length &= ~GENMASK(2, 0); /* Align to 4 bytes */
+		/* Issue a WRITE_DATA command */
+		write_req.header.cmd_header.length = sizeof(write_req) - sizeof(write_req.header)
+						       + write_length;
+		write_req.header.header_crc = crc8((uint8_t *)&write_req.header + 1,
+					    sizeof(write_req.header) - 1, 0xD3, 0xFF, false);
+		write_req.address_low = write_addr & GENMASK(31, 0);
+		write_req.address_high = (write_addr >> 32);
+		write_req.length = write_length;
+		memcpy(occp_rw_buffer, &write_req, sizeof(write_req));
+		memcpy(occp_rw_buffer + sizeof(write_req), data, write_length);
+		LOG_DBG("Sending OCCP WRITE_DATA command: addr=0x%llx, length=%zu, remaining=%zu",
+			write_addr, write_length, length);
+		ret = backend->send(backend, occp_rw_buffer, sizeof(write_req) + write_length);
+		if (ret != 0) {
+			LOG_ERR("Failed to send OCCP WRITE_DATA command: %d", ret);
+			return ret;
+		}
 
-	memcpy(occp_rw_buffer, &write_req, sizeof(write_req));
-	memcpy(occp_rw_buffer + sizeof(write_req), data, length);
-	ret = backend->send(backend, occp_rw_buffer, sizeof(write_req) + length);
-	if (ret != 0) {
-		LOG_ERR("Failed to send OCCP WRITE_DATA command: %d", ret);
-		return ret;
-	}
-	/*
-	 * TODO: this likely won't be required post-silicon, but for now the
-	 * renode simulation framework requires a delay before writing new data
-	 * since the remote SMC may not execute immediately after data is written
-	 * to the I3C bus. If the response read starts early, the remote ROM
-	 * will see an oversized write.
-	 */
-	k_msleep(100);
-	/* Now read the response */
-	ret = backend->receive(backend, (uint8_t *)&resp, sizeof(resp));
-	if (ret != 0) {
-		LOG_ERR("Failed to read OCCP WRITE_DATA response: %d", ret);
-		return ret;
-	}
-	if (resp.cmd_header.flags) {
-		LOG_ERR("OCCP WRITE_DATA command failed with flags: 0x%02x",
-			resp.cmd_header.flags);
-		return -EIO;
+		/* Now read the response */
+		ret = backend->receive(backend, (uint8_t *)&resp, sizeof(resp));
+		if (ret != 0) {
+			LOG_ERR("Failed to read OCCP WRITE_DATA response: %d", ret);
+			return ret;
+		}
+		if (resp.cmd_header.flags) {
+			LOG_ERR("OCCP WRITE_DATA command failed with flags: 0x%02x",
+				resp.cmd_header.flags);
+			retry_cnt--;
+			k_msleep(1000);
+			if (retry_cnt == 0) {
+				return -EIO;
+			}
+		} else {
+			retry_cnt = 10; /* Reset retry count on success */
+			/* Advance to next chunk */
+			write_addr += write_length;
+			data += write_length;
+			length -= write_length;
+		}
 	}
 	return 0;
 }
@@ -133,43 +145,47 @@ int occp_read_data(const struct occp_backend *backend, uint64_t address, uint8_t
 {
 	struct occp_read_data_request read_req = {0};
 	int ret;
+	uint64_t read_addr = address;
+	size_t read_length;
 
-	if (length > OCCP_MAX_RW_SIZE) {
-		LOG_ERR("OCCP read length %zu exceeds maximum %d", length, OCCP_MAX_RW_SIZE);
+	if (address & GENMASK(2, 0)) {
+		LOG_ERR("OCCP read address must be 4-byte aligned");
 		return -EINVAL;
 	}
 
-	/* Issue a READ_DATA command */
-	read_req.header.cmd_header.app_id = OCCP_APP_BASE;
-	read_req.header.cmd_header.msg_id = OCCP_BASE_MSG_READ_DATA;
-	read_req.header.cmd_header.length = sizeof(read_req) - sizeof(read_req.header);
-	read_req.header.header_crc = crc8((uint8_t *)&read_req.header + 1,
-				   sizeof(read_req.header) - 1, 0xD3, 0xFF, false);
-	read_req.address_low = address & GENMASK(31, 0);
-	read_req.address_high = (address >> 32);
-	read_req.length = length;
+	while (length > 0) {
+		read_length = MIN(length, OCCP_MAX_MSG_SIZE);
+		read_length &= ~GENMASK(2, 0); /* Align to 4 bytes */
 
-	ret = backend->send(backend, (uint8_t *)&read_req, sizeof(read_req));
-	if (ret != 0) {
-		LOG_ERR("Failed to send OCCP READ_DATA command: %d", ret);
-		return ret;
-	}
-	/*
-	 * TODO: this likely won't be required post-silicon, but for now the
-	 * renode simulation framework requires a delay before writing new data
-	 * since the remote SMC may not execute immediately after data is written
-	 * to the I3C bus. If the response read starts early, the remote ROM
-	 * will see an oversized write.
-	 */
-	k_msleep(100);
+		/* Issue a READ_DATA command */
+		read_req.header.cmd_header.app_id = OCCP_APP_BASE;
+		read_req.header.cmd_header.msg_id = OCCP_BASE_MSG_READ_DATA;
+		read_req.header.cmd_header.length = sizeof(read_req) - sizeof(read_req.header);
+		read_req.header.header_crc = crc8((uint8_t *)&read_req.header + 1,
+					   sizeof(read_req.header) - 1, 0xD3, 0xFF, false);
+		read_req.address_low = read_addr & GENMASK(31, 0);
+		read_req.address_high = (read_addr >> 32);
+		read_req.length = read_length;
 
-	/* Now read the response */
-	ret = backend->receive(backend, occp_rw_buffer, sizeof(struct occp_header) + length);
-	if (ret != 0) {
-		LOG_ERR("Failed to read OCCP READ_DATA response: %d", ret);
-		return ret;
+		LOG_DBG("Sending OCCP READ_DATA command: addr=0x%llx, length=%zu, remaining=%zu",
+			read_addr, read_length, length);
+		ret = backend->send(backend, (uint8_t *)&read_req, sizeof(read_req));
+		if (ret != 0) {
+			LOG_ERR("Failed to send OCCP READ_DATA command: %d", ret);
+			return ret;
+		}
+
+		ret = backend->receive(backend, occp_rw_buffer, sizeof(struct occp_header) + read_length);
+		if (ret != 0) {
+			LOG_ERR("Failed to read OCCP READ_DATA response: %d", ret);
+			return ret;
+		}
+		memcpy(data, occp_rw_buffer + sizeof(struct occp_header), read_length);
+		/* Advance to next chunk */
+		read_addr += read_length;
+		data += read_length;
+		length -= read_length;
 	}
-	memcpy(data, occp_rw_buffer + sizeof(struct occp_header), length);
 	return 0;
 }
 

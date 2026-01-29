@@ -15,8 +15,7 @@
 #define OCCP_APP_BOOT               0x1
 #define OCCP_BOOT_MSG_EXECUTE_IMAGE 0x1
 
-#define OCCP_MAX_RW_SIZE 2048
-#define OCCP_MAX_RW_BUFFER_SIZE (sizeof(struct occp_write_data_request) + OCCP_MAX_RW_SIZE)
+#define OCCP_MAX_MSG_SIZE 255
 
 struct occp_cmd_header {
 	uint8_t app_id: 8;

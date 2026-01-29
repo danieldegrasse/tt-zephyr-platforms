@@ -16,7 +16,7 @@
 const struct device *smc_dev = DEVICE_DT_GET(DT_NODELABEL(remoteproc));
 
 uint8_t remote_smc_bin[] = {
-	#include <remote_smc_bin.inc>
+	#include CONFIG_REMOTE_SMC_BINARY_HEADER
 };
 const unsigned int remote_smc_bin_len = sizeof(remote_smc_bin);
 
@@ -37,7 +37,10 @@ int main(void)
 		return ret;
 	}
 
-	test_pass();
+	while (1) {
+		k_sleep(K_SECONDS(1));
+		printf("Primary BL1 is alive!\n");
+	}
 
 	return 0;
 }
