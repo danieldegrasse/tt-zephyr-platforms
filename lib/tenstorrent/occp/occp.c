@@ -78,7 +78,7 @@ int occp_write_data(const struct occp_backend *backend, uint64_t address, const 
 	/* Retry a transfer up to 10 times */
 	int retry_cnt = 10;
 
-	if (address & GENMASK(2, 0)) {
+	if (address & GENMASK(1, 0)) {
 		LOG_ERR("OCCP write address must be 4-byte aligned");
 		return -EINVAL;
 	}
@@ -88,7 +88,7 @@ int occp_write_data(const struct occp_backend *backend, uint64_t address, const 
 	write_req.header.cmd_header.msg_id = OCCP_BASE_MSG_WRITE_DATA;
 	while (length > 0) {
 		write_length = MIN(length, OCCP_MAX_MSG_SIZE - sizeof(write_req));
-		write_length &= ~GENMASK(2, 0); /* Align to 4 bytes */
+		write_length &= ~GENMASK(1, 0); /* Align to 4 bytes */
 		/* Issue a WRITE_DATA command */
 		write_req.header.cmd_header.length = sizeof(write_req) - sizeof(write_req.header)
 						       + write_length;
