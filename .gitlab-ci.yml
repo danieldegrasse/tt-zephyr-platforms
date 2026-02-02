@@ -10,6 +10,7 @@ build-job:
     - west update
     - cd /tt-zephyr
     - ./tt-zephyr-platforms/scripts/ci/build-grendel.sh
+    - "echo $CI_PIPELINE_SOURCE"
 
   tags:
     - 8-core
@@ -18,6 +19,7 @@ pr-tests:
   needs: [build-job]
   script:
     - echo "CI Dry run (PR checks)"
+    - echo "Running PR specific tests..."
   rules:
     - if: $CI_PIPELINE_SOURCE == "external_pull_request_event"
   tags:
