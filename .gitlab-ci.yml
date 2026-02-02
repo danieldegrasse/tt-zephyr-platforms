@@ -1,11 +1,11 @@
 build-job:
   image: ghcr.io/tenstorrent/tt-zephyr-platforms/ci-image:v19.4.2
   script:
-    - echo "Building Zephyr platforms..."
-    # Replace the existing tt-zephyr-platforms with the current commit
-    - rm -r /tt-zephyr/tt-zephyr-platforms
-    - ln -s $CI_PROJECT_DIR /tt-zephyr/tt-zephyr-platforms
     - cd /tt-zephyr/tt-zephyr-platforms
+    # Pull repo revision to run CI on
+    - git remote add ci $CI_REPOSITORY_URL
+    - git fetch ci $CI_COMMIT_SHA
+    - git checkout FETCH_HEAD
     - west packages pip --install
     - west update
     - cd /tt-zephyr
