@@ -2,10 +2,12 @@ build-job:
   image: ghcr.io/tenstorrent/tt-zephyr-platforms/ci-image:v19.4.2
   script:
     - echo "Building Zephyr platforms..."
+    # Replace the existing tt-zephyr-platforms with the current commit
+    - rm -r /tt-zephyr/tt-zephyr-platforms
+    - ln -s $CI_PROJECT_DIR /tt-zephyr/tt-zephyr-platforms
     - cd /tt-zephyr/tt-zephyr-platforms
-    - git fetch origin
-    - git checkout $CI_COMMIT_SHA
     - west packages pip --install
+    - west update
     - cd /tt-zephyr
     - ./tt-zephyr-platforms/scripts/ci/build-grendel.sh
 
